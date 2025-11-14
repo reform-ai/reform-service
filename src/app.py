@@ -60,18 +60,54 @@ async def health():
     return {"status": "healthy"}
 
 
-
-
 @app.post("/upload-video")
 async def upload_video(video: UploadFile = File(...)):
     """
     Accepts video file upload via FormData
-    Processes with pose estimation and returns visualization
+    Validates file and processes with pose estimation
+    Returns visualization with landmarks
     """
     temp_path = None
     output_path = None
     try:
+        # Validate file was provided
+        if not video.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        # Validate content type is video (using accept_video_file function)
         file_info = accept_video_file(video)
+        
+        # Read file size for validation (need to reset file pointer after)
+        contents = await video.read()
+        file_size = len(contents)
+        await video.seek(0)  # Reset file pointer for processing
+        
+        # Validate file size (not empty)
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail="Empty file received")
+        
+        # Validate file size (reasonable limit, e.g., 500MB)
+        MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+        if file_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"File too large: {file_size} bytes. Maximum size: {MAX_FILE_SIZE} bytes"
+            )
+        
+        # Validate file has content (basic check)
+        if len(contents) < 100:
+            raise HTTPException(
+                status_code=400, 
+                detail="File appears to be too small to be a valid video"
+            )
+        
+        # Log validation success
+        print(f"✅ Video received and validated successfully!")
+        print(f"   Filename: {video.filename}")
+        print(f"   Size: {file_size} bytes ({round(file_size / (1024 * 1024), 2)} MB)")
+        print(f"   Content Type: {video.content_type}")
+        
+        # Process video: extract frames, pose estimation, visualization
         temp_path = save_video_temp(video)
         frames, fps = extract_frames(temp_path)
         
@@ -88,16 +124,23 @@ async def upload_video(video: UploadFile = File(...)):
         visualization_url = f"http://127.0.0.1:8000/outputs/{output_filename}"
         
         return {
+            "status": "success",
             "message": "Video processed successfully",
             "filename": file_info["filename"],
             "content_type": file_info["content_type"],
+            "size": file_size,
+            "size_mb": round(file_size / (1024 * 1024), 2),
             "frame_count": len(frames),
-            "visualization_path": output_path,
-            "visualization_url": visualization_url
+            "visualization_path": str(output_path),
+            "visualization_url": visualization_url,
+            "validated": True
         }
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        print(f"❌ Error processing video: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
     finally:
         if temp_path and os.path.exists(temp_path):
