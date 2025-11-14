@@ -34,3 +34,6 @@ htmlcov/
 # Logs
 *.log
 
+# Outputs
+outputs/
+

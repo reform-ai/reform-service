@@ -38,12 +38,13 @@ def save_video_temp(file: UploadFile) -> str:
     return temp_file.name
 
 
-def extract_frames(video_path: str) -> list:
+def extract_frames(video_path: str) -> tuple:
     """
     Extracts frames from video file using OpenCV
-    Returns list of frames as numpy arrays
+    Returns tuple of (frames list, fps)
     """
     cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frames = []
     
     while True:
@@ -53,5 +54,28 @@ def extract_frames(video_path: str) -> list:
         frames.append(frame)
     
     cap.release()
-    return frames
+    return frames, fps
+
+
+def save_frames_as_video(frames: list, output_path: str, fps: float = 30.0) -> str:
+    """
+    Saves frames as video file using OpenCV
+    Returns path to saved video
+    """
+    if not frames:
+        raise ValueError("No frames to save")
+    
+    h, w, _ = frames[0].shape
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    
+    if not out.isOpened():
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    
+    for frame in frames:
+        out.write(frame)
+    
+    out.release()
+    return output_path
 
