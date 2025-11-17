@@ -98,47 +98,74 @@ async def save_video_temp(file: UploadFile) -> str:
     return temp_file.name
 
 
-def extract_frames(video_path: str, validate: bool = True) -> tuple:
+def process_frames_from_source(source, validate: bool = True) -> tuple:
     """
-    Extracts frames from video file using OpenCV.
+    General frame processor - accepts video path (str) or frame list.
     Returns tuple of (frames list, fps, frame_validation, fps_validation).
+    Usable by both upload (file path) and livestream (frame list).
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        if validate:
-            from src.shared.upload_video.video_validation import validate_extracted_frames, detect_fps_from_video
-            frame_validation = validate_extracted_frames([])
-            fps, fps_validation = detect_fps_from_video(video_path, 0)
-            return [], fps, frame_validation, fps_validation
-        return [], 30.0, None, None
-    frames = []
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames.append(frame)
-    except Exception as e:
+    if isinstance(source, str):
+        # File path - extract frames
+        cap = cv2.VideoCapture(source)
+        if not cap.isOpened():
+            if validate:
+                from src.shared.upload_video.video_validation import validate_extracted_frames, detect_fps_from_video
+                frame_validation = validate_extracted_frames([])
+                fps, fps_validation = detect_fps_from_video(source, 0)
+                return [], fps, frame_validation, fps_validation
+            return [], 30.0, None, None
+        frames = []
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(frame)
+        except Exception as e:
+            cap.release()
+            if validate:
+                from src.shared.upload_video.video_validation import validate_extracted_frames, detect_fps_from_video
+                frame_validation = validate_extracted_frames(frames)
+                if "errors" not in frame_validation:
+                    frame_validation["errors"] = []
+                frame_validation["errors"].insert(0, f"Error during frame extraction: {str(e)}")
+                frame_validation["is_valid"] = False
+                fps, fps_validation = detect_fps_from_video(source, len(frames))
+                return frames, fps, frame_validation, fps_validation
+            return frames, 30.0, None, None
         cap.release()
-        if validate:
-            from src.shared.upload_video.video_validation import validate_extracted_frames, detect_fps_from_video
-            frame_validation = validate_extracted_frames(frames)
-            if "errors" not in frame_validation:
-                frame_validation["errors"] = []
-            frame_validation["errors"].insert(0, f"Error during frame extraction: {str(e)}")
-            frame_validation["is_valid"] = False
-            fps, fps_validation = detect_fps_from_video(video_path, len(frames))
-            return frames, fps, frame_validation, fps_validation
-        return frames, 30.0, None, None
-    cap.release()
+        video_path = source
+    elif isinstance(source, list):
+        # Frame list - use directly
+        frames = source
+        video_path = None
+    else:
+        raise ValueError(f"Unsupported source type: {type(source)}")
+    
     if validate:
         from src.shared.upload_video.video_validation import validate_extracted_frames, detect_fps_from_video
         frame_validation = validate_extracted_frames(frames)
-        fps, fps_validation = detect_fps_from_video(video_path, len(frames))
+        if video_path:
+            fps, fps_validation = detect_fps_from_video(video_path, len(frames))
+        else:
+            fps, fps_validation = 30.0, {"is_valid": True, "fps": 30.0, "warnings": []}
         return frames, fps, frame_validation, fps_validation
-    from src.shared.upload_video.video_validation import detect_fps_from_video
-    fps, _ = detect_fps_from_video(video_path, len(frames))
+    
+    if video_path:
+        from src.shared.upload_video.video_validation import detect_fps_from_video
+        fps, _ = detect_fps_from_video(video_path, len(frames))
+    else:
+        fps = 30.0
     return frames, fps, None, None
+
+
+def extract_frames(video_path: str, validate: bool = True) -> tuple:
+    """
+    Upload-specific wrapper - extracts frames from video file path.
+    Returns tuple of (frames list, fps, frame_validation, fps_validation).
+    Maintains backward compatibility.
+    """
+    return process_frames_from_source(video_path, validate)
 
 
 def save_frames_as_video(frames: list, output_path: str, fps: float = 30.0) -> str:

@@ -34,6 +34,7 @@ htmlcov/
 # Logs
 *.log
 WORK_LOG.md
+LIVESTREAM_ANALYSIS.md
 
 # Outputs
 outputs/
