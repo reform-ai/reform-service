@@ -56,6 +56,25 @@ async def health():
     return {"status": "healthy"}
 
 
+def get_required_landmarks(exercise: int) -> list:
+    """
+    General function to get required landmarks for an exercise.
+    Usable by both upload and livestream.
+    Returns list of required landmark indices or None if not applicable.
+    """
+    if exercise == 1:
+        from src.exercise_1.calculation.landmark_validation import get_squat_required_landmarks
+        return get_squat_required_landmarks()
+    elif exercise == 2:
+        # TODO: Add bench required landmarks when implemented
+        return None
+    elif exercise == 3:
+        # TODO: Add deadlift required landmarks when implemented
+        return None
+    else:
+        return None
+
+
 def route_to_exercise_calculation(exercise: int, landmarks_list: list, validation_result: dict = None) -> dict:
     """Routes to appropriate exercise calculation module."""
     if exercise == 1:
@@ -68,13 +87,22 @@ def route_to_exercise_calculation(exercise: int, landmarks_list: list, validatio
         raise ValueError(f"Invalid exercise: {exercise}")
 
 
-def _validate_exercise(exercise: int) -> None:
-    """Validates exercise type."""
+def validate_exercise_type(exercise: int) -> tuple:
+    """
+    General exercise type validator - returns validation result without raising exceptions.
+    Usable by both upload and livestream.
+    Returns tuple of (is_valid: bool, error_message: str).
+    """
     if exercise not in [1, 2, 3]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid exercise type: {exercise}. Must be 1 (Squat), 2 (Bench), or 3 (Deadlift)"
-        )
+        return False, f"Invalid exercise type: {exercise}. Must be 1 (Squat), 2 (Bench), or 3 (Deadlift)"
+    return True, None
+
+
+def _validate_exercise(exercise: int) -> None:
+    """Upload-specific wrapper - validates exercise type and raises HTTPException if invalid. Maintains backward compatibility."""
+    is_valid, error_message = validate_exercise_type(exercise)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_message)
 
 
 async def _validate_file(video: UploadFile, file_size: int = None) -> tuple:
@@ -99,10 +127,18 @@ async def _validate_file(video: UploadFile, file_size: int = None) -> tuple:
     return file_info, file_size
 
 
-def _check_camera_angle(landmarks_list: list) -> dict:
-    """Checks camera angle and raises exception if too extreme."""
+def check_camera_angle(landmarks_list: list) -> dict:
+    """
+    General camera angle checker - returns camera angle info without raising exceptions.
+    Usable by both upload and livestream. Check 'should_reject' flag to handle rejection.
+    """
     from src.exercise_1.calculation.calculation import detect_camera_angle
-    camera_angle_info = detect_camera_angle(landmarks_list)
+    return detect_camera_angle(landmarks_list)
+
+
+def _check_camera_angle(landmarks_list: list) -> dict:
+    """Upload-specific wrapper - checks camera angle and raises HTTPException if too extreme. Maintains backward compatibility."""
+    camera_angle_info = check_camera_angle(landmarks_list)
     if camera_angle_info.get("should_reject", False):
         raise HTTPException(
             status_code=400,
@@ -203,9 +239,9 @@ def _analyze_exercise_form(exercise: int, calculation_results: dict, fps: float,
     return form_analysis, squat_phases
 
 
-def _process_video_analysis(video: UploadFile, exercise: int, frames: list, fps: float, landmarks_list: list, validation_result: dict = None) -> tuple:
-    """Processes video analysis and returns results."""
-    camera_angle_info = _check_camera_angle(landmarks_list)
+def process_analysis_pipeline(exercise: int, frames: list, fps: float, landmarks_list: list, validation_result: dict = None) -> tuple:
+    """Core analysis pipeline - processes frames and returns analysis results. General function usable by both upload and livestream."""
+    camera_angle_info = check_camera_angle(landmarks_list)
     calculation_results = route_to_exercise_calculation(exercise, landmarks_list, validation_result)
     form_analysis, squat_phases = _analyze_exercise_form(
         exercise, calculation_results, fps, camera_angle_info, landmarks_list, validation_result
@@ -213,31 +249,129 @@ def _process_video_analysis(video: UploadFile, exercise: int, frames: list, fps:
     return calculation_results, camera_angle_info, form_analysis, squat_phases
 
 
-def _build_response(exercise: int, file_info: dict, file_size: int, frames: list, output_path: Path,
-                   output_filename: str, calculation_results: dict, camera_angle_info: dict,
-                   form_analysis: dict, squat_phases: dict) -> dict:
-    """Builds the response dictionary."""
+def _process_video_analysis(video: UploadFile, exercise: int, frames: list, fps: float, landmarks_list: list, validation_result: dict = None) -> tuple:
+    """Upload-specific wrapper for process_analysis_pipeline. Handles camera angle rejection for upload. Maintains backward compatibility."""
+    calc_results, cam_info, form_analysis, squat_phases = process_analysis_pipeline(exercise, frames, fps, landmarks_list, validation_result)
+    if cam_info.get("should_reject", False):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "camera_angle_too_extreme",
+                "message": cam_info["message"],
+                "angle_estimate": cam_info["angle_estimate"],
+                "recommendation": "Please record again with the person standing perpendicular to the camera for accurate measurements."
+            }
+        )
+    return calc_results, cam_info, form_analysis, squat_phases
+
+
+def build_analysis_response(exercise: int, frame_count: int, calculation_results: dict, camera_angle_info: dict,
+                            form_analysis: dict, squat_phases: dict) -> dict:
+    """Builds general analysis response dictionary. Usable by both upload and livestream."""
     exercise_names = {1: "Squat", 2: "Bench", 3: "Deadlift"}
     return {
-        "status": "success", "message": "Video processed successfully", "exercise": exercise,
-        "exercise_name": exercise_names[exercise], "filename": file_info["filename"],
-        "content_type": file_info["content_type"], "size": file_size,
-        "size_mb": round(file_size / (1024 * 1024), 2), "frame_count": len(frames),
-        "visualization_path": str(output_path), "visualization_url": f"http://127.0.0.1:8000/outputs/{output_filename}",
-        "calculation_results": calculation_results, "camera_angle_info": camera_angle_info,
-        "form_analysis": form_analysis, "squat_phases": squat_phases, "validated": True
+        "status": "success",
+        "exercise": exercise,
+        "exercise_name": exercise_names[exercise],
+        "frame_count": frame_count,
+        "calculation_results": calculation_results,
+        "camera_angle_info": camera_angle_info,
+        "form_analysis": form_analysis,
+        "squat_phases": squat_phases,
+        "validated": True
     }
 
 
-def _create_visualization(frames: list, landmarks_list: list, fps: float) -> str:
-    """Creates visualization video and returns output path."""
+def _build_response(exercise: int, file_info: dict, file_size: int, frames: list, output_path: Path,
+                   output_filename: str, calculation_results: dict, camera_angle_info: dict,
+                   form_analysis: dict, squat_phases: dict) -> dict:
+    """Upload-specific response builder. Adds upload metadata to general analysis response."""
+    analysis_response = build_analysis_response(
+        exercise, len(frames), calculation_results, camera_angle_info, form_analysis, squat_phases
+    )
+    analysis_response.update({
+        "message": "Video processed successfully",
+        "filename": file_info["filename"],
+        "content_type": file_info["content_type"],
+        "size": file_size,
+        "size_mb": round(file_size / (1024 * 1024), 2),
+        "visualization_path": str(output_path),
+        "visualization_url": f"http://127.0.0.1:8000/outputs/{output_filename}"
+    })
+    return analysis_response
+
+
+def create_visualization(frames: list, landmarks_list: list, fps: float, 
+                        calculation_results: dict = None, form_analysis: dict = None,
+                        output_dir: Path = None, output_filename: str = None) -> tuple:
+    """
+    Creates visualization video with configurable output location. 
+    General function usable by both upload and livestream.
+    
+    Args:
+        frames: List of video frames
+        landmarks_list: List of MediaPipe pose landmarks
+        fps: Frames per second
+        calculation_results: Optional dict with angles_per_frame and asymmetry_per_frame
+        form_analysis: Optional dict with form analysis results (for glute_dominance status)
+        output_dir: Optional output directory (defaults to OUTPUTS_DIR)
+        output_filename: Optional output filename (defaults to UUID)
+    
+    Returns:
+        Tuple of (output_path, output_filename)
+    """
     landmark_indices = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 29, 30, 31, 32]
-    annotated_frames = draw_landmarks_on_frames(frames, landmarks_list, landmark_indices)
-    video_id = str(uuid.uuid4())
-    output_filename = f"{video_id}.mp4"
-    output_path = OUTPUTS_DIR / output_filename
+    
+    # Calculate per-frame status if data is available
+    per_frame_status = None
+    if calculation_results and form_analysis:
+        from src.shared.visualization.per_frame_status import calculate_per_frame_status
+        glute_dominance_status = None
+        if form_analysis.get("glute_dominance"):
+            glute_dominance_status = form_analysis["glute_dominance"].get("status")
+        
+        per_frame_status = calculate_per_frame_status(
+            angles_per_frame=calculation_results.get("angles_per_frame", {}),
+            asymmetry_per_frame=calculation_results.get("asymmetry_per_frame"),
+            glute_dominance_status=glute_dominance_status
+        )
+        
+        # Apply temporal smoothing to reduce flickering (0.2s window)
+        from src.shared.visualization.per_frame_status import smooth_per_frame_status
+        per_frame_status = smooth_per_frame_status(per_frame_status, fps, window_duration_seconds=0.2)
+    
+    annotated_frames = draw_landmarks_on_frames(frames, landmarks_list, landmark_indices, per_frame_status, fps)
+    
+    if output_dir is None:
+        output_dir = OUTPUTS_DIR
+    if output_filename is None:
+        video_id = str(uuid.uuid4())
+        output_filename = f"{video_id}.mp4"
+    output_path = output_dir / output_filename
     save_frames_as_video(annotated_frames, str(output_path), fps)
     return str(output_path), output_filename
+
+
+def _create_visualization(frames: list, landmarks_list: list, fps: float, 
+                         calculation_results: dict = None, form_analysis: dict = None) -> tuple:
+    """
+    Upload-specific wrapper for create_visualization. 
+    Uses default OUTPUTS_DIR. Maintains backward compatibility.
+    
+    Args:
+        frames: List of video frames
+        landmarks_list: List of MediaPipe pose landmarks
+        fps: Frames per second
+        calculation_results: Optional dict with angles_per_frame and asymmetry_per_frame
+        form_analysis: Optional dict with form analysis results
+    
+    Returns:
+        Tuple of (output_path, output_filename)
+    """
+    output_path, output_filename = create_visualization(
+        frames, landmarks_list, fps, calculation_results, form_analysis, OUTPUTS_DIR, None
+    )
+    return output_path, output_filename
 
 
 def _handle_upload_errors(e: Exception):
@@ -261,6 +395,111 @@ def _get_client_ip(request: Request) -> str:
     if client and client.host:
         return client.host
     return "unknown"
+
+
+def validate_video_data(frames: list, fps: float, landmarks_list: list, validation_result: dict, exercise: int, 
+                       skip_file_validations: bool = False) -> dict:
+    """
+    General validation orchestrator - validates frames, fps, duration, and landmarks.
+    Usable by both upload and livestream (livestream can skip file validations).
+    Returns dict with validation results or raises HTTPException on failure.
+    """
+    validation_results = {"all_valid": True, "errors": []}
+    
+    # Frame validation (if frames were extracted with validation)
+    if frames:
+        frame_count = len(frames)
+        if frame_count == 0:
+            raise HTTPException(status_code=400, detail={
+                "error": "frame_extraction_failed",
+                "message": "No frames extracted from video",
+                "frame_count": 0,
+                "valid_frame_count": 0,
+                "recommendation": "Please try re-exporting the video"
+            })
+    else:
+        frame_count = 0
+    
+    # FPS validation
+    from src.shared.upload_video.video_validation import validate_fps
+    fps_validation = validate_fps(fps)
+    if not fps_validation.get("is_valid", True):
+        raise HTTPException(status_code=400, detail={
+            "error": "fps_validation_failed",
+            "message": fps_validation.get("errors", ["FPS validation failed"])[0],
+            "fps": fps_validation.get("fps", 0),
+            "warnings": fps_validation.get("warnings", []),
+            "recommendation": fps_validation.get("recommendation", "Please use a video with valid FPS metadata")
+        })
+    
+    # Duration validation (only if frames available)
+    if not skip_file_validations and frame_count > 0:
+        from src.shared.upload_video.video_validation import validate_video_duration
+        duration_validation = validate_video_duration(frame_count, fps, max_duration_seconds=120.0)
+        if not duration_validation.get("is_valid", True):
+            raise HTTPException(status_code=400, detail={
+                "error": "video_duration_exceeded",
+                "message": duration_validation.get("errors", ["Video duration validation failed"])[0],
+                "duration_seconds": duration_validation.get("duration_seconds", 0),
+                "frame_count": duration_validation.get("frame_count", 0),
+                "fps": duration_validation.get("fps", 0),
+                "recommendation": duration_validation.get("recommendation", "Please select a video shorter than 120 seconds")
+            })
+    
+    # Landmark validation
+    if validation_result and not validation_result.get("overall_valid", True):
+        raise HTTPException(status_code=400, detail={
+            "error": "insufficient_pose_detection",
+            "message": validation_result.get("errors", ["Insufficient pose detection"])[0],
+            "valid_frame_percentage": validation_result.get("valid_frame_percentage", 0.0),
+            "recommendation": validation_result.get("recommendation", "Ensure person is fully visible")
+        })
+    
+    validation_results["all_valid"] = True
+    return validation_results
+
+
+async def validate_uploaded_file(temp_path: str, video: UploadFile, file_size: int) -> dict:
+    """
+    Upload-specific file validation - validates file headers, content, and format.
+    Returns file_info dict or raises HTTPException on failure.
+    """
+    file_info, _ = await _validate_file(video, file_size)
+    from src.shared.upload_video.video_validation import validate_file_headers, validate_video_format
+    header_validation = validate_file_headers(temp_path)
+    if not header_validation.get("is_valid", False):
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise HTTPException(status_code=400, detail={
+            "error": "invalid_file_headers",
+            "message": header_validation.get("errors", ["Invalid file headers"])[0],
+            "detected_format": header_validation.get("detected_format", None),
+            "recommendation": header_validation.get("recommendation", "Please upload a valid video file")
+        })
+    from src.shared.upload_video.video_validation import validate_file_content
+    content_validation = validate_file_content(temp_path)
+    if not content_validation.get("is_valid", False):
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise HTTPException(status_code=400, detail={
+            "error": "invalid_file_content",
+            "message": content_validation.get("errors", ["File content validation failed"])[0],
+            "warnings": content_validation.get("warnings", []),
+            "fps": content_validation.get("fps", 0),
+            "frame_count": content_validation.get("frame_count", 0),
+            "recommendation": content_validation.get("recommendation", "Please upload a valid video file")
+        })
+    format_validation = validate_video_format(temp_path)
+    if not format_validation.get("is_valid", False):
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise HTTPException(status_code=400, detail={
+            "error": "video_format_unsupported",
+            "message": format_validation.get("errors", ["Video format not supported"])[0],
+            "codec": format_validation.get("codec", "unknown"),
+            "recommendation": format_validation.get("recommendation", "Please convert to MP4 (H.264) format")
+        })
+    return file_info
 
 
 def _check_rate_limit(client_ip: str) -> None:
@@ -304,41 +543,7 @@ async def upload_video(
         _validate_exercise(exercise)
         temp_path = await save_video_temp(video)
         file_size = os.path.getsize(temp_path)
-        file_info, _ = await _validate_file(video, file_size)
-        from src.shared.upload_video.video_validation import validate_file_headers, validate_video_format
-        header_validation = validate_file_headers(temp_path)
-        if not header_validation.get("is_valid", False):
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise HTTPException(status_code=400, detail={
-                "error": "invalid_file_headers",
-                "message": header_validation.get("errors", ["Invalid file headers"])[0],
-                "detected_format": header_validation.get("detected_format", None),
-                "recommendation": header_validation.get("recommendation", "Please upload a valid video file")
-            })
-        from src.shared.upload_video.video_validation import validate_file_content
-        content_validation = validate_file_content(temp_path)
-        if not content_validation.get("is_valid", False):
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise HTTPException(status_code=400, detail={
-                "error": "invalid_file_content",
-                "message": content_validation.get("errors", ["File content validation failed"])[0],
-                "warnings": content_validation.get("warnings", []),
-                "fps": content_validation.get("fps", 0),
-                "frame_count": content_validation.get("frame_count", 0),
-                "recommendation": content_validation.get("recommendation", "Please upload a valid video file")
-            })
-        format_validation = validate_video_format(temp_path)
-        if not format_validation.get("is_valid", False):
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise HTTPException(status_code=400, detail={
-                "error": "video_format_unsupported",
-                "message": format_validation.get("errors", ["Video format not supported"])[0],
-                "codec": format_validation.get("codec", "unknown"),
-                "recommendation": format_validation.get("recommendation", "Please convert to MP4 (H.264) format")
-            })
+        file_info = await validate_uploaded_file(temp_path, video, file_size)
         frames, fps, frame_validation, fps_validation = extract_frames(temp_path, validate=True)
         if frame_validation and not frame_validation.get("is_valid", True):
             raise HTTPException(status_code=400, detail={
@@ -348,42 +553,15 @@ async def upload_video(
                 "valid_frame_count": frame_validation.get("valid_frame_count", 0),
                 "recommendation": frame_validation.get("recommendation", "Please try re-exporting the video")
             })
-        if fps_validation and not fps_validation.get("is_valid", True):
-            raise HTTPException(status_code=400, detail={
-                "error": "fps_validation_failed",
-                "message": fps_validation.get("errors", ["FPS validation failed"])[0],
-                "fps": fps_validation.get("fps", 0),
-                "warnings": fps_validation.get("warnings", []),
-                "recommendation": fps_validation.get("recommendation", "Please use a video with valid FPS metadata")
-            })
-        from src.shared.upload_video.video_validation import validate_video_duration
-        frame_count = len(frames) if frames else 0
-        duration_validation = validate_video_duration(frame_count, fps, max_duration_seconds=120.0)
-        if not duration_validation.get("is_valid", True):
-            raise HTTPException(status_code=400, detail={
-                "error": "video_duration_exceeded",
-                "message": duration_validation.get("errors", ["Video duration validation failed"])[0],
-                "duration_seconds": duration_validation.get("duration_seconds", 0),
-                "frame_count": duration_validation.get("frame_count", 0),
-                "fps": duration_validation.get("fps", 0),
-                "recommendation": duration_validation.get("recommendation", "Please select a video shorter than 120 seconds")
-            })
-        required_landmarks = None
-        if exercise == 1:
-            from src.exercise_1.calculation.landmark_validation import get_squat_required_landmarks
-            required_landmarks = get_squat_required_landmarks()
+        required_landmarks = get_required_landmarks(exercise)
         landmarks_list, validation_result = process_frames_with_pose(frames, validate=True, required_landmarks=required_landmarks)
-        if validation_result and not validation_result.get("overall_valid", True):
-            raise HTTPException(status_code=400, detail={
-                "error": "insufficient_pose_detection",
-                "message": validation_result.get("errors", ["Insufficient pose detection"])[0],
-                "valid_frame_percentage": validation_result.get("valid_frame_percentage", 0.0),
-                "recommendation": validation_result.get("recommendation", "Ensure person is fully visible")
-            })
+        validate_video_data(frames, fps, landmarks_list, validation_result, exercise, skip_file_validations=False)
         calc_results, cam_info, form_analysis, squat_phases = _process_video_analysis(
             video, exercise, frames, fps, landmarks_list, validation_result
         )
-        output_path, output_filename = _create_visualization(frames, landmarks_list, fps)
+        output_path, output_filename = _create_visualization(
+            frames, landmarks_list, fps, calc_results, form_analysis
+        )
         return _build_response(exercise, file_info, file_size, frames, Path(output_path),
                               output_filename, calc_results, cam_info, form_analysis, squat_phases)
     except Exception as e:
