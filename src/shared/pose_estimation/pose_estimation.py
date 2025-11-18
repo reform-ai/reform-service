@@ -11,16 +11,24 @@ import math
 def process_frames_with_pose(frames: list, validate: bool = False, required_landmarks: list = None) -> tuple:
     """
     Processes frames with MediaPipe Pose to extract keypoints.
+    Uses batch processing to reduce memory usage.
     Returns landmarks list and optionally validation result.
     """
     mp_pose = mp.solutions.pose
     pose = mp_pose.Pose()
     results = []
     
-    for frame in frames:
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = pose.process(rgb_frame)
-        results.append(result.pose_landmarks)
+    # Process in batches to reduce memory pressure
+    # Process 50 frames at a time, then release memory
+    BATCH_SIZE = 50
+    for i in range(0, len(frames), BATCH_SIZE):
+        batch = frames[i:i + BATCH_SIZE]
+        for frame in batch:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            result = pose.process(rgb_frame)
+            results.append(result.pose_landmarks)
+        # Explicitly delete batch to free memory
+        del batch
     
     pose.close()
     if validate:

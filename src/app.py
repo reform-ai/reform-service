@@ -244,8 +244,10 @@ def _analyze_exercise_form(exercise: int, calculation_results: dict, fps: float,
     return form_analysis, squat_phases
 
 
-def process_analysis_pipeline(exercise: int, frames: list, fps: float, landmarks_list: list, validation_result: dict = None) -> tuple:
-    """Core analysis pipeline - processes frames and returns analysis results. General function usable by both upload and livestream."""
+def process_analysis_pipeline(exercise: int, frames: list = None, fps: float = 30.0, landmarks_list: list = None, validation_result: dict = None) -> tuple:
+    """Core analysis pipeline - processes frames and returns analysis results. General function usable by both upload and livestream.
+    Note: frames parameter is kept for backward compatibility but is not actually used - only landmarks_list is needed.
+    """
     camera_angle_info = check_camera_angle(landmarks_list)
     calculation_results = route_to_exercise_calculation(exercise, landmarks_list, validation_result)
     form_analysis, squat_phases = _analyze_exercise_form(
@@ -287,12 +289,12 @@ def build_analysis_response(exercise: int, frame_count: int, calculation_results
     }
 
 
-def _build_response(exercise: int, file_info: dict, file_size: int, frames: list, output_path: Path,
+def _build_response(exercise: int, file_info: dict, file_size: int, frame_count: int, output_path: Path,
                    output_filename: str, calculation_results: dict, camera_angle_info: dict,
                    form_analysis: dict, squat_phases: dict) -> dict:
     """Upload-specific response builder. Adds upload metadata to general analysis response."""
     analysis_response = build_analysis_response(
-        exercise, len(frames), calculation_results, camera_angle_info, form_analysis, squat_phases
+        exercise, frame_count, calculation_results, camera_angle_info, form_analysis, squat_phases
     )
     analysis_response.update({
         "message": "Video processed successfully",
@@ -561,13 +563,28 @@ async def upload_video(
         required_landmarks = get_required_landmarks(exercise)
         landmarks_list, validation_result = process_frames_with_pose(frames, validate=True, required_landmarks=required_landmarks)
         validate_video_data(frames, fps, landmarks_list, validation_result, exercise, skip_file_validations=False)
+        
+        # Store frame count before deleting frames to free memory
+        frame_count = len(frames)
+        
+        # Delete frames after pose estimation to free memory (we only need landmarks now)
+        # Visualization will re-extract frames from video file
+        del frames
+        import gc
+        gc.collect()  # Force garbage collection
+        
         calc_results, cam_info, form_analysis, squat_phases = _process_video_analysis(
-            video, exercise, frames, fps, landmarks_list, validation_result
+            video, exercise, None, fps, landmarks_list, validation_result  # Pass None for frames
         )
+        # Re-extract frames for visualization only
+        frames_for_viz, _, _, _ = extract_frames(temp_path, validate=False)
         output_path, output_filename = _create_visualization(
-            frames, landmarks_list, fps, calc_results, form_analysis
+            frames_for_viz, landmarks_list, fps, calc_results, form_analysis
         )
-        return _build_response(exercise, file_info, file_size, frames, Path(output_path),
+        del frames_for_viz  # Delete visualization frames after use
+        gc.collect()
+        
+        return _build_response(exercise, file_info, file_size, frame_count, Path(output_path),
                               output_filename, calc_results, cam_info, form_analysis, squat_phases)
     except Exception as e:
         _handle_upload_errors(e)
