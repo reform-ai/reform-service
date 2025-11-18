@@ -120,8 +120,10 @@ def process_frames_from_source(source, validate: bool = True) -> tuple:
         duration = total_frames / fps_from_cap if fps_from_cap > 0 else 0
         
         # Memory optimization: downsample frames for long videos
-        # Target: max 1800 frames (~60 seconds at 30fps) to stay under ~500MB memory
-        MAX_FRAMES = 1800
+        # Target: max 300 frames (~10 seconds at 30fps) to stay under ~150MB memory
+        # This accounts for MediaPipe processing + frame storage + visualization
+        # MediaPipe and frame copies can use significant memory
+        MAX_FRAMES = 300
         frame_skip = 1
         if total_frames > MAX_FRAMES:
             frame_skip = max(1, total_frames // MAX_FRAMES)
