@@ -27,7 +27,11 @@ app = FastAPI(
     version="0.1.0"
 )
 
-OUTPUTS_DIR = Path("outputs")
+# Use /tmp/outputs on Heroku (ephemeral filesystem), otherwise use local outputs directory
+if os.environ.get("DYNO"):  # Heroku sets DYNO environment variable
+    OUTPUTS_DIR = Path("/tmp/outputs")
+else:
+    OUTPUTS_DIR = Path("outputs")
 OUTPUTS_DIR.mkdir(exist_ok=True)
 app.add_middleware(
     CORSMiddleware,
@@ -318,7 +322,8 @@ def _build_response(exercise: int, file_info: dict, file_size: int, frame_count:
         exercise, frame_count, calculation_results, camera_angle_info, form_analysis, squat_phases
     )
     if visualization_url is None:
-        visualization_url = f"http://127.0.0.1:8000/outputs/{output_filename}"
+        # visualization_url should always be provided by the caller
+        visualization_url = ""
     analysis_response.update({
         "message": "Video processed successfully",
         "filename": file_info["filename"],
@@ -621,8 +626,20 @@ async def upload_video(
             OUTPUTS_DIR, None, frame_skip
         )
         
-        base_url = str(request.url).replace(request.url.path, '')
-        visualization_url = f"{base_url}/outputs/{output_filename}"
+        # Verify file exists before constructing URL
+        if not os.path.exists(output_path):
+            visualization_url = None
+        else:
+            # Construct URL properly for both local and Heroku
+            # On Heroku, use X-Forwarded-Proto and Host headers
+            # On localhost, use request.base_url directly
+            if os.environ.get("DYNO"):  # Heroku
+                scheme = request.headers.get("X-Forwarded-Proto", "https")
+                host = request.headers.get("Host", request.url.hostname)
+                visualization_url = f"{scheme}://{host}/outputs/{output_filename}"
+            else:  # Localhost
+                base_url = str(request.base_url).rstrip('/')
+                visualization_url = f"{base_url}/outputs/{output_filename}"
         
         return _build_response(exercise, file_info, file_size, frame_count, Path(output_path),
                               output_filename, calc_results, cam_info, form_analysis, squat_phases, visualization_url)
