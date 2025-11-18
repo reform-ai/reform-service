@@ -312,6 +312,11 @@ def create_visualization_streaming(video_path: str, landmarks_list: list, output
     
     # Create video writer - try multiple codecs (headless OpenCV may not have all codecs)
     # Try codecs in order of preference
+    # Note: Use .avi extension for better compatibility with some codecs
+    import os
+    base_path = os.path.splitext(output_path)[0]
+    temp_output_path = f"{base_path}.avi"  # Use .avi for better codec support
+    
     codecs_to_try = [
         ('mp4v', cv2.VideoWriter_fourcc(*'mp4v')),  # MPEG-4 Part 2 (most compatible)
         ('XVID', cv2.VideoWriter_fourcc(*'XVID')),  # Xvid codec
@@ -321,16 +326,17 @@ def create_visualization_streaming(video_path: str, landmarks_list: list, output
     out = None
     used_codec = None
     for codec_name, fourcc in codecs_to_try:
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
         if out.isOpened():
             used_codec = codec_name
             break
-        out.release()
+        if out:
+            out.release()
         out = None
     
     if not out or not out.isOpened():
         cap.release()
-        raise ValueError(f"Could not create output video file: {output_path}. Tried codecs: {[c[0] for c in codecs_to_try]}")
+        raise ValueError(f"Could not create output video file: {temp_output_path}. Tried codecs: {[c[0] for c in codecs_to_try]}")
     
     frame_index = 0
     landmark_index = 0
@@ -371,9 +377,36 @@ def create_visualization_streaming(video_path: str, landmarks_list: list, output
             frame_index += 1
     finally:
         cap.release()
-        out.release()
+        if out:
+            out.release()
     
-    return output_path
+    # Verify video file was created and has content
+    if not os.path.exists(temp_output_path):
+        raise ValueError(f"Output video file was not created: {temp_output_path}")
+    
+    file_size = os.path.getsize(temp_output_path)
+    if file_size == 0:
+        raise ValueError(f"Output video file is empty: {temp_output_path}")
+    
+    # Verify video can be opened (basic validation)
+    test_cap = cv2.VideoCapture(temp_output_path)
+    if not test_cap.isOpened():
+        raise ValueError(f"Output video file cannot be opened: {temp_output_path}")
+    test_cap.release()
+    
+    # If original path was .mp4, rename .avi to .mp4 (browsers can play .avi too, but .mp4 is preferred)
+    if output_path.endswith('.mp4') and temp_output_path != output_path:
+        # Try to rename, but if it fails, return the .avi file
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            os.rename(temp_output_path, output_path)
+            return output_path
+        except Exception:
+            # If rename fails, return the .avi file (browsers can still play it)
+            return temp_output_path
+    
+    return temp_output_path
 
 
 def draw_landmarks_on_frames(frames: list, landmarks_list: list, 
