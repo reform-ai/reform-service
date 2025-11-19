@@ -655,7 +655,6 @@ async def upload_video(
 ):
     """Accepts video file upload and processes with pose estimation using streaming to minimize memory."""
     temp_path = None
-    user = None
     
     try:
         # Check if user is authenticated and apply token system
@@ -769,12 +768,24 @@ async def upload_video(
         
         # Full token check for logged-in users (after we know file size)
         if is_authenticated:
-            # Refresh user from DB to get latest token count
+            # Re-fetch user from DB in this session to get latest token count
+            # (user object from earlier session is detached, so we need to query again)
             db = next(get_db())
             try:
-                db.refresh(user)
+                from src.shared.auth.database import User
+                current_user = db.query(User).filter(User.id == user_id).first()
+                if not current_user:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                    db.close()
+                    raise HTTPException(
+                        status_code=401,
+                        detail="User not found"
+                    )
+                # Reset tokens if it's a new day
+                reset_daily_tokens_if_needed(current_user, db)
                 token_cost = calculate_token_cost(file_size)
-                if user.tokens_remaining < token_cost:
+                if current_user.tokens_remaining < token_cost:
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
                     db.close()
@@ -782,15 +793,17 @@ async def upload_video(
                         status_code=402,  # Payment Required
                         detail={
                             "error": "insufficient_tokens",
-                            "message": f"Insufficient tokens. You need {token_cost:.1f} tokens but only have {user.tokens_remaining} remaining.",
+                            "message": f"Insufficient tokens. You need {token_cost:.1f} tokens but only have {current_user.tokens_remaining} remaining.",
                             "tokens_required": round(token_cost, 1),
-                            "tokens_remaining": user.tokens_remaining,
+                            "tokens_remaining": current_user.tokens_remaining,
                             "tokens_reset": "Daily tokens reset at midnight UTC"
                         }
                     )
             except HTTPException:
                 raise
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.error(f"Failed to check user tokens after file upload: {str(e)}")
                 db.rollback()
             finally:
                 db.close()
