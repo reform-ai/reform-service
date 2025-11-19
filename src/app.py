@@ -493,14 +493,27 @@ def _cleanup_old_outputs(outputs_dir: Path) -> None:
 
 def _handle_upload_errors(e: Exception):
     """Handles upload errors and raises appropriate HTTPException."""
+    import logging
+    import traceback
+    error_msg = str(e)
+    error_type = type(e).__name__
+    logging.error(f"[ERROR_HANDLER] ===== _handle_upload_errors CALLED =====")
+    logging.error(f"[ERROR_HANDLER] Error type: {error_type}")
+    logging.error(f"[ERROR_HANDLER] Error message: {error_msg}")
+    logging.error(f"[ERROR_HANDLER] Full traceback:")
+    logging.error(traceback.format_exc())
+    if "invalid state" in error_msg.lower() or "detached" in error_msg.lower() or "InvalidStateError" in error_type:
+        logging.error(f"[ERROR_HANDLER] *** INVALID STATE ERROR DETECTED IN ERROR HANDLER ***")
+    
     if isinstance(e, HTTPException):
         raise e
     elif isinstance(e, ValueError):
         raise HTTPException(status_code=400, detail=str(e))
     else:
+        logging.error(f"Unexpected error during video upload: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail={
             "error": "internal_server_error",
-            "message": "An unexpected error occurred while processing your video"
+            "message": "An unexpected error occurred while processing your video. Please try again later."
         })
 
 
@@ -654,7 +667,12 @@ async def upload_video(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     """Accepts video file upload and processes with pose estimation using streaming to minimize memory."""
+    import logging
+    logging.info(f"[UPLOAD_START] ===== UPLOAD VIDEO REQUEST STARTED =====")
     temp_path = None
+    # Initialize token variables for signed-in users (must be initialized before try block)
+    tokens_used = None
+    tokens_remaining = None
     
     try:
         # Check if user is authenticated and apply token system
@@ -664,6 +682,11 @@ async def upload_video(
             payload = verify_token(credentials.credentials)
             if payload:
                 user_id = payload.get("sub")
+                logging.info(f"[UPLOAD_START] User authenticated, user_id: {user_id}")
+            else:
+                logging.info(f"[UPLOAD_START] Token verification failed")
+        else:
+            logging.info(f"[UPLOAD_START] No credentials provided (anonymous user)")
         
         client_ip = _get_client_ip(request)
         _check_rate_limit(client_ip)
@@ -671,6 +694,7 @@ async def upload_video(
         
         # Check authentication status
         is_authenticated = credentials is not None and user_id is not None
+        logging.info(f"[UPLOAD_START] is_authenticated: {is_authenticated}")
         
         # For logged-in users: check if they have at least 1 token BEFORE upload (base cost is always 1)
         if is_authenticated:
@@ -1091,6 +1115,17 @@ async def upload_video(
         
         return response
     except Exception as e:
+        import logging
+        import traceback
+        error_msg = str(e)
+        error_type = type(e).__name__
+        logging.error(f"[UPLOAD_ERROR] ===== EXCEPTION CAUGHT IN UPLOAD ENDPOINT =====")
+        logging.error(f"[UPLOAD_ERROR] Error type: {error_type}")
+        logging.error(f"[UPLOAD_ERROR] Error message: {error_msg}")
+        logging.error(f"[UPLOAD_ERROR] Full traceback:")
+        logging.error(traceback.format_exc())
+        if "invalid state" in error_msg.lower() or "detached" in error_msg.lower() or "InvalidStateError" in error_type:
+            logging.error(f"[UPLOAD_ERROR] *** INVALID STATE ERROR DETECTED IN MAIN EXCEPTION HANDLER ***")
         _handle_upload_errors(e)
     finally:
         if temp_path and os.path.exists(temp_path):
