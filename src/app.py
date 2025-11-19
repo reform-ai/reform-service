@@ -37,9 +37,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://reform-218d942f420c.herokuapp.com",
         "https://reformgym.fit",
-        "https://www.reformgym.fit"
+        "https://reform-client-c95dd550c494.herokuapp.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
