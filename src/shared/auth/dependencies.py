@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 from src.shared.auth.database import get_db, User
 from src.shared.auth.auth import verify_token
 
-security = HTTPBearer()
+# Use auto_error=False to prevent HTTPBearer from auto-validating when header is present
+# This ensures it only validates when explicitly used via Depends()
+security = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
