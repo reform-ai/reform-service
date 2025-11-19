@@ -58,14 +58,16 @@ class User(Base):
 
 def init_db():
     """Initialize database tables."""
+    import logging
     try:
         # Use checkfirst=True to avoid errors if tables already exist
         Base.metadata.create_all(bind=engine, checkfirst=True)
+        logging.info("Database tables initialized successfully")
     except Exception as e:
-        # Log error but don't raise - database will be created on first use
-        import logging
-        logging.warning(f"Database initialization warning: {str(e)}")
-        # Try to continue - database operations will handle errors gracefully
+        # Log error - this is important for debugging
+        logging.error(f"Database initialization error: {str(e)}")
+        # Don't raise - let the fallback in routes handle it
+        # This allows the app to start even if DB init fails
 
 
 def get_db():
