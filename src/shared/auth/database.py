@@ -32,11 +32,17 @@ if "sqlite" in DATABASE_URL:
 
 # Use pool_pre_ping to check connections before using them (helps with SQLite on Heroku)
 # Use pool_recycle for connection recycling (only for non-SQLite databases)
+# For SQLite, use a single connection pool to avoid concurrency issues
 engine_kwargs = {
     "connect_args": connect_args,
     "pool_pre_ping": True,  # Verify connections before using
 }
-if "sqlite" not in DATABASE_URL:
+if "sqlite" in DATABASE_URL:
+    # SQLite-specific: use a single connection to avoid "invalid state" errors
+    # This prevents concurrent access issues on Heroku's ephemeral filesystem
+    engine_kwargs["poolclass"] = None  # Use NullPool for SQLite (single connection)
+    engine_kwargs["pool_pre_ping"] = False  # Not needed for single connection
+else:
     # Only set pool_recycle for non-SQLite databases (PostgreSQL, etc.)
     engine_kwargs["pool_recycle"] = 3600  # Recycle connections after 1 hour
 
@@ -78,6 +84,9 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
