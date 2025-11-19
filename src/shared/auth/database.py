@@ -2,6 +2,7 @@
 
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 from datetime import datetime
 import os
 
