@@ -39,3 +39,7 @@ LIVESTREAM_ANALYSIS.md
 # Outputs
 outputs/
 
+# Database
+*.db
+reform.db
+

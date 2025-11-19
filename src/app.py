@@ -15,6 +15,8 @@ from src.shared.upload_video.upload_video import (
     save_video_temp
 )
 from src.exercise_1.calculation.calculation import calculate_squat_form
+from src.shared.auth.database import init_db
+from src.shared.auth.routes import router as auth_router
 
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 5
@@ -26,6 +28,14 @@ app = FastAPI(
     description="Exercise form analysis service using LLM and Computer Vision",
     version="0.1.0"
 )
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+
+# Include auth routes
+app.include_router(auth_router)
 
 # Use /tmp/outputs on Heroku (ephemeral filesystem), otherwise use local outputs directory
 if os.environ.get("DYNO"):  # Heroku sets DYNO environment variable
