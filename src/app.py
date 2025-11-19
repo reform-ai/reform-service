@@ -4,7 +4,7 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, Depends
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from collections import deque
@@ -15,8 +15,10 @@ from src.shared.upload_video.upload_video import (
     save_video_temp
 )
 from src.exercise_1.calculation.calculation import calculate_squat_form
-from src.shared.auth.database import init_db
+from src.shared.auth.database import init_db, get_db, reset_daily_tokens_if_needed, calculate_token_cost
 from src.shared.auth.routes import router as auth_router
+from src.shared.auth.dependencies import security
+from fastapi.security import HTTPAuthorizationCredentials
 
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 5
@@ -577,17 +579,59 @@ async def upload_video(
     request: Request,
     video: UploadFile = File(...),
     exercise: int = Form(...),
-    # Explicitly ignore Authorization header if present (upload doesn't require auth)
-    # This prevents HTTPBearer from auto-validating and opening a database session
+    # Optional: check for Authorization header to apply token limits for logged-in users
+    credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     """Accepts video file upload and processes with pose estimation using streaming to minimize memory."""
     temp_path = None
+    user = None
+    
     try:
+        # Check if user is authenticated and apply token system
+        if credentials:
+            from src.shared.auth.auth import verify_token
+            from src.shared.auth.database import User
+            payload = verify_token(credentials.credentials)
+            if payload:
+                user_id = payload.get("sub")
+                if user_id:
+                    db = next(get_db())
+                    try:
+                        user = db.query(User).filter(User.id == user_id).first()
+                        if user:
+                            # Reset tokens if it's a new day
+                            reset_daily_tokens_if_needed(user, db)
+                            
+                            # Calculate token cost for this analysis
+                            # We'll get file_size after saving, so we'll check tokens after that
+                    except Exception:
+                        pass  # If DB access fails, continue without token check
+                    finally:
+                        db.close()
+        
         client_ip = _get_client_ip(request)
         _check_rate_limit(client_ip)
         _validate_exercise(exercise)
         temp_path = await save_video_temp(video)
         file_size = os.path.getsize(temp_path)
+        
+        # Check tokens for logged-in users before processing
+        if user:
+            token_cost = calculate_token_cost(file_size)
+            if user.tokens_remaining < token_cost:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                raise HTTPException(
+                    status_code=402,  # Payment Required
+                    detail={
+                        "error": "insufficient_tokens",
+                        "message": f"Insufficient tokens. You need {token_cost:.1f} tokens but only have {user.tokens_remaining} remaining.",
+                        "tokens_required": round(token_cost, 1),
+                        "tokens_remaining": user.tokens_remaining,
+                        "tokens_reset": "Daily tokens reset at midnight UTC"
+                    }
+                )
+        
         file_info = await validate_uploaded_file(temp_path, video, file_size)
         
         import cv2
@@ -661,8 +705,33 @@ async def upload_video(
                 base_url = str(request.base_url).rstrip('/')
                 visualization_url = f"{base_url}/outputs/{output_filename}"
         
-        return _build_response(exercise, file_info, file_size, frame_count, Path(output_path),
-                              output_filename, calc_results, cam_info, form_analysis, squat_phases, visualization_url)
+        # Deduct tokens for logged-in users after successful analysis
+        tokens_used = None
+        tokens_remaining = None
+        if user:
+            token_cost = calculate_token_cost(file_size)
+            db = next(get_db())
+            try:
+                # Refresh user from DB to get latest token count
+                db.refresh(user)
+                user.tokens_remaining = max(0, user.tokens_remaining - token_cost)
+                db.commit()
+                tokens_used = round(token_cost, 1)
+                tokens_remaining = int(user.tokens_remaining)
+            except Exception:
+                db.rollback()
+            finally:
+                db.close()
+        
+        response = _build_response(exercise, file_info, file_size, frame_count, Path(output_path),
+                                  output_filename, calc_results, cam_info, form_analysis, squat_phases, visualization_url)
+        
+        # Add token information to response if user is logged in
+        if user:
+            response["tokens_used"] = tokens_used
+            response["tokens_remaining"] = tokens_remaining
+        
+        return response
     except Exception as e:
         _handle_upload_errors(e)
     finally:

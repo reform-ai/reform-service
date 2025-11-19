@@ -1,9 +1,9 @@
 """Database setup and configuration."""
 
-from sqlalchemy import create_engine, Column, String, Boolean, DateTime
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Integer
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import NullPool
-from datetime import datetime
+from datetime import datetime, date
 import os
 
 # Use SQLite for simplicity (can be upgraded to PostgreSQL later)
@@ -64,6 +64,9 @@ class User(Base):
     is_verified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_login = Column(DateTime, nullable=True)
+    # Token system: users get 10 tokens per day
+    tokens_remaining = Column(Integer, default=10, nullable=False)
+    last_token_reset = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 def init_db():
@@ -90,4 +93,36 @@ def get_db():
         raise
     finally:
         db.close()
+
+
+def reset_daily_tokens_if_needed(user: User, db) -> None:
+    """Reset user's tokens to 10 if it's a new day."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    last_reset = user.last_token_reset
+    
+    # Check if it's a new day (compare dates, not times)
+    if last_reset:
+        # Make both timezone-aware for comparison
+        if last_reset.tzinfo is None:
+            last_reset = last_reset.replace(tzinfo=timezone.utc)
+        
+        # Reset if it's a different day
+        if last_reset.date() < now.date():
+            user.tokens_remaining = 10
+            user.last_token_reset = now
+            db.commit()
+
+
+def calculate_token_cost(file_size_bytes: int) -> float:
+    """
+    Calculate token cost for an analysis.
+    Base cost: 1 token
+    Additional cost: 0.2 tokens per 50MB of file size
+    Recommended: 0.2 tokens per 50MB (so a 500MB file uses 2 additional tokens)
+    """
+    base_cost = 1.0
+    size_mb = file_size_bytes / (1024 * 1024)  # Convert bytes to MB
+    additional_cost = (size_mb / 50.0) * 0.2  # 0.2 tokens per 50MB
+    return base_cost + additional_cost
 

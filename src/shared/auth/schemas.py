@@ -33,6 +33,7 @@ class UserResponse(BaseModel):
     full_name: str
     is_verified: bool
     created_at: Optional[str] = None
+    tokens_remaining: Optional[int] = None  # Number of tokens remaining today
 
 
 class ChangePasswordRequest(BaseModel):

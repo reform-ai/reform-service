@@ -59,14 +59,16 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
     # Create new user
     user_id = generate_user_id()
     password_hash = hash_password(request.password)
-    
+
     new_user = User(
         id=user_id,
         email=request.email,
         password_hash=password_hash,
         full_name=request.full_name,
         is_verified=False,  # Email verification to be implemented later
-        created_at=datetime.utcnow()
+        created_at=datetime.utcnow(),
+        tokens_remaining=10,  # New users start with 10 tokens
+        last_token_reset=datetime.utcnow()
     )
     
     db.add(new_user)
@@ -120,14 +122,23 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_current_user_info(current_user: User = Depends(get_current_user)):
+async def get_current_user_info(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Get current user information."""
+    # Reset tokens if it's a new day
+    from src.shared.auth.database import reset_daily_tokens_if_needed
+    reset_daily_tokens_if_needed(current_user, db)
+    db.refresh(current_user)
+    
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
         full_name=current_user.full_name,
         is_verified=current_user.is_verified,
-        created_at=current_user.created_at.isoformat() if current_user.created_at else None
+        created_at=current_user.created_at.isoformat() if current_user.created_at else None,
+        tokens_remaining=current_user.tokens_remaining
     )
 
 
