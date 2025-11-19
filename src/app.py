@@ -691,7 +691,8 @@ async def upload_video(
                 # If tokens were reset, commit the change
                 if tokens_before != user.tokens_remaining:
                     db.commit()
-                    db.refresh(user)
+                    # Re-query to get fresh state after commit (refresh can cause invalid state error)
+                    user = db.query(User).filter(User.id == user_id).first()
                 # Quick check: ensure user has at least 1 token before upload
                 # Full check with file size will happen after upload
                 if user.tokens_remaining < 1:
@@ -793,7 +794,8 @@ async def upload_video(
                 # If tokens were reset, commit the change
                 if tokens_before != current_user.tokens_remaining:
                     db.commit()
-                    db.refresh(current_user)
+                    # Re-query to get fresh state after commit (refresh can cause invalid state error)
+                    current_user = db.query(User).filter(User.id == user_id).first()
                 token_cost = calculate_token_cost(file_size)
                 if current_user.tokens_remaining < token_cost:
                     if os.path.exists(temp_path):
@@ -897,7 +899,8 @@ async def upload_video(
         tokens_remaining = None
         
         # Only track anonymous analysis if user is truly not authenticated
-        is_authenticated = credentials is not None and user is not None
+        # Use user_id (set at the start) instead of user object which may not exist here
+        is_authenticated = credentials is not None and user_id is not None
         if not is_authenticated:
             # Track anonymous analysis by IP
             db = next(get_db())
@@ -937,11 +940,16 @@ async def upload_video(
                 current_user = db.query(User).filter(User.id == user_id).first()
                 if current_user:
                     # Reset tokens if it's a new day (in case day changed during analysis)
-                    # This modifies the object but doesn't commit
+                    tokens_before_reset = current_user.tokens_remaining
                     reset_daily_tokens_if_needed(current_user, db)
+                    # If tokens were reset, we need to re-query to get fresh state
+                    if tokens_before_reset != current_user.tokens_remaining:
+                        db.commit()
+                        # Re-query to get fresh state after commit (prevents invalid state error)
+                        current_user = db.query(User).filter(User.id == user_id).first()
                     # Deduct tokens
                     current_user.tokens_remaining = max(0, current_user.tokens_remaining - token_cost)
-                    # Commit all changes at once (token reset + deduction)
+                    # Commit the token deduction
                     db.commit()
                     # Read the value we just set (no refresh needed, we have it)
                     tokens_used = round(token_cost, 1)

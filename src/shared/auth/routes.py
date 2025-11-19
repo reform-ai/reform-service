@@ -83,7 +83,7 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
         
         db.add(new_user)
         db.commit()
-        db.refresh(new_user)
+        # No need to refresh - we have all the values we need
         
         # Create access token
         access_token = create_access_token(data={"sub": user_id, "email": request.email})
@@ -155,7 +155,8 @@ async def get_current_user_info(
     # If tokens were reset, commit the change
     if tokens_before != current_user.tokens_remaining:
         db.commit()
-        db.refresh(current_user)
+        # Re-query to get fresh state after commit (refresh can cause invalid state error)
+        current_user = db.query(User).filter(User.id == current_user.id).first()
     
     return UserResponse(
         id=current_user.id,
