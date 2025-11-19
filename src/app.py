@@ -617,7 +617,10 @@ async def upload_video(
         file_size = os.path.getsize(temp_path)
         
         # For logged-out users: enforce limits (1 analysis per IP, max 200MB)
-        if not user:
+        # Only check anonymous limits if user is not authenticated
+        # Check both: no credentials provided OR credentials provided but user not found
+        is_authenticated = credentials is not None and user is not None
+        if not is_authenticated:
             MAX_FILE_SIZE_ANONYMOUS = 200 * 1024 * 1024  # 200MB
             if file_size >= MAX_FILE_SIZE_ANONYMOUS:
                 if os.path.exists(temp_path):
@@ -759,10 +762,13 @@ async def upload_video(
                 visualization_url = f"{base_url}/outputs/{output_filename}"
         
         # Track anonymous analysis or deduct tokens for logged-in users after successful analysis
+        # Only track/increment AFTER successful completion (we're past all error points here)
         tokens_used = None
         tokens_remaining = None
         
-        if not user:
+        # Only track anonymous analysis if user is truly not authenticated
+        is_authenticated = credentials is not None and user is not None
+        if not is_authenticated:
             # Track anonymous analysis by IP
             db = next(get_db())
             try:
