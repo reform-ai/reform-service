@@ -635,6 +635,10 @@ async def upload_video(
             # Check if IP has already completed 1 analysis
             db = next(get_db())
             try:
+                # Ensure table exists (fallback if startup init failed)
+                from src.shared.auth.database import Base, engine
+                Base.metadata.create_all(bind=engine, checkfirst=True)
+                
                 anonymous_record = db.query(AnonymousAnalysis).filter(
                     AnonymousAnalysis.ip_address == client_ip
                 ).first()
@@ -652,7 +656,14 @@ async def upload_video(
                             "limit": 1
                         }
                     )
-            except Exception:
+            except HTTPException:
+                # Re-raise HTTP exceptions (like the 403 above)
+                raise
+            except Exception as e:
+                # Log database errors but allow request to continue
+                # This prevents database issues from blocking all anonymous users
+                import logging
+                logging.warning(f"Failed to check anonymous analysis limit: {str(e)}")
                 db.rollback()
             finally:
                 db.close()
@@ -747,10 +758,40 @@ async def upload_video(
                 base_url = str(request.base_url).rstrip('/')
                 visualization_url = f"{base_url}/outputs/{output_filename}"
         
-        # Deduct tokens for logged-in users after successful analysis
+        # Track anonymous analysis or deduct tokens for logged-in users after successful analysis
         tokens_used = None
         tokens_remaining = None
-        if user:
+        
+        if not user:
+            # Track anonymous analysis by IP
+            db = next(get_db())
+            try:
+                anonymous_record = db.query(AnonymousAnalysis).filter(
+                    AnonymousAnalysis.ip_address == client_ip
+                ).first()
+                
+                if anonymous_record:
+                    anonymous_record.analysis_count += 1
+                    anonymous_record.last_analysis_at = datetime.utcnow()
+                else:
+                    anonymous_record = AnonymousAnalysis(
+                        ip_address=client_ip,
+                        analysis_count=1,
+                        first_analysis_at=datetime.utcnow(),
+                        last_analysis_at=datetime.utcnow()
+                    )
+                    db.add(anonymous_record)
+                
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                # Log error but don't fail the request
+                import logging
+                logging.error(f"Failed to track anonymous analysis: {str(e)}")
+            finally:
+                db.close()
+        else:
+            # Deduct tokens for logged-in users
             token_cost = calculate_token_cost(file_size)
             db = next(get_db())
             try:
