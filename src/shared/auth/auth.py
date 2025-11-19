@@ -9,9 +9,11 @@ import uuid
 # JWT settings
 SECRET_KEY = os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
-    raise ValueError(
-        "SECRET_KEY environment variable is required. "
-        "Please set it to a secure random string (e.g., generate with: python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    import logging
+    logging.warning(
+        "SECRET_KEY environment variable is not set. "
+        "JWT token operations will fail. "
+        "Please set SECRET_KEY to a secure random string."
     )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30 days
@@ -54,6 +56,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     """Create a JWT access token."""
+    if not SECRET_KEY:
+        raise ValueError(
+            "SECRET_KEY environment variable is required for token creation. "
+            "Please set it to a secure random string (e.g., generate with: python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+        )
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -66,6 +73,10 @@ def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
 
 def verify_token(token: str) -> dict:
     """Verify and decode a JWT token."""
+    if not SECRET_KEY:
+        import logging
+        logging.error("SECRET_KEY is not set. Cannot verify token.")
+        return None
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
