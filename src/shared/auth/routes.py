@@ -167,3 +167,19 @@ async def change_password(
     return {"message": "Password changed successfully"}
 
 
+@router.get("/admin/users", response_model=list[UserResponse])
+async def list_all_users(db: Session = Depends(get_db)):
+    """Temporary admin endpoint to list all users. Remove in production."""
+    users = db.query(User).all()
+    return [
+        UserResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            is_verified=user.is_verified,
+            created_at=user.created_at.isoformat() if user.created_at else None
+        )
+        for user in users
+    ]
+
+
