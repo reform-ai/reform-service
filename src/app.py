@@ -238,7 +238,7 @@ async def _validate_file(video: UploadFile, file_size: int = None) -> tuple:
     if file_size == 0:
         raise HTTPException(status_code=400, detail="Empty file received")
     
-    MAX_FILE_SIZE = 500 * 1024 * 1024
+    MAX_FILE_SIZE = 250 * 1024 * 1024
     if file_size > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail=f"File too large: {file_size} bytes. Maximum: {MAX_FILE_SIZE} bytes")
     
@@ -772,7 +772,7 @@ async def upload_video(
         
         # Check file size limit for anonymous users (after upload but before processing)
         if not is_authenticated:
-            MAX_FILE_SIZE_ANONYMOUS = 200 * 1024 * 1024  # 200MB
+            MAX_FILE_SIZE_ANONYMOUS = 100 * 1024 * 1024  # 100MB
             if file_size >= MAX_FILE_SIZE_ANONYMOUS:
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
@@ -780,8 +780,8 @@ async def upload_video(
                     status_code=400,
                     detail={
                         "error": "file_too_large_anonymous",
-                        "message": "File size exceeds 200MB limit for anonymous users. Please sign up for larger file support.",
-                        "max_size_mb": 200,
+                        "message": "File size exceeds 100MB limit for anonymous users. Please sign up for larger file support.",
+                        "max_size_mb": 100,
                         "file_size_mb": round(file_size / (1024 * 1024), 2)
                     }
                 )
