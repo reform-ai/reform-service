@@ -5,8 +5,10 @@ import tempfile
 import uuid
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, Depends
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from collections import deque
 import time
 from datetime import datetime
@@ -55,6 +57,7 @@ if os.environ.get("DYNO"):  # Heroku sets DYNO environment variable
 else:
     OUTPUTS_DIR = Path("outputs")
 OUTPUTS_DIR.mkdir(exist_ok=True)
+# CORS configuration - must be added before exception handlers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -65,7 +68,104 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+# Global exception handlers to ensure CORS headers are always added
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Ensure CORS headers are added to FastAPI HTTP exceptions."""
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin in [
+        "http://localhost:3000",
+        "https://reformgym.fit",
+        "https://reform-client-c95dd550c494.herokuapp.com"
+    ]:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    
+    # Handle both string and dict detail formats
+    if isinstance(exc.detail, dict):
+        content = exc.detail
+    elif isinstance(exc.detail, str):
+        content = {"detail": exc.detail}
+    else:
+        content = {"detail": str(exc.detail)}
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=content,
+        headers=headers
+    )
+
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Ensure CORS headers are added to Starlette HTTP exceptions."""
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin in [
+        "http://localhost:3000",
+        "https://reformgym.fit",
+        "https://reform-client-c95dd550c494.herokuapp.com"
+    ]:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail} if isinstance(exc.detail, (str, dict)) else {"detail": str(exc.detail)},
+        headers=headers
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Ensure CORS headers are added to validation errors."""
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin in [
+        "http://localhost:3000",
+        "https://reformgym.fit",
+        "https://reform-client-c95dd550c494.herokuapp.com"
+    ]:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+        headers=headers
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Ensure CORS headers are added to all exceptions."""
+    import logging
+    logging.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin in [
+        "http://localhost:3000",
+        "https://reformgym.fit",
+        "https://reform-client-c95dd550c494.herokuapp.com"
+    ]:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=headers
+    )
 
 
 @app.get("/")
