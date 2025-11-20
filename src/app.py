@@ -493,23 +493,12 @@ def _cleanup_old_outputs(outputs_dir: Path) -> None:
 
 def _handle_upload_errors(e: Exception):
     """Handles upload errors and raises appropriate HTTPException."""
-    import logging
-    import traceback
-    error_msg = str(e)
-    error_type = type(e).__name__
-    logging.error(f"[ERROR_HANDLER] ===== _handle_upload_errors CALLED =====")
-    logging.error(f"[ERROR_HANDLER] Error type: {error_type}")
-    logging.error(f"[ERROR_HANDLER] Error message: {error_msg}")
-    logging.error(f"[ERROR_HANDLER] Full traceback:")
-    logging.error(traceback.format_exc())
-    if "invalid state" in error_msg.lower() or "detached" in error_msg.lower() or "InvalidStateError" in error_type:
-        logging.error(f"[ERROR_HANDLER] *** INVALID STATE ERROR DETECTED IN ERROR HANDLER ***")
-    
     if isinstance(e, HTTPException):
         raise e
     elif isinstance(e, ValueError):
         raise HTTPException(status_code=400, detail=str(e))
     else:
+        import logging
         logging.error(f"Unexpected error during video upload: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail={
             "error": "internal_server_error",
@@ -667,8 +656,6 @@ async def upload_video(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     """Accepts video file upload and processes with pose estimation using streaming to minimize memory."""
-    import logging
-    logging.info(f"[UPLOAD_START] ===== UPLOAD VIDEO REQUEST STARTED =====")
     temp_path = None
     # Initialize token variables for signed-in users (must be initialized before try block)
     tokens_used = None
@@ -682,11 +669,8 @@ async def upload_video(
             payload = verify_token(credentials.credentials)
             if payload:
                 user_id = payload.get("sub")
-                logging.info(f"[UPLOAD_START] User authenticated, user_id: {user_id}")
-            else:
-                logging.info(f"[UPLOAD_START] Token verification failed")
         else:
-            logging.info(f"[UPLOAD_START] No credentials provided (anonymous user)")
+            pass  # Anonymous user
         
         client_ip = _get_client_ip(request)
         _check_rate_limit(client_ip)
@@ -694,12 +678,9 @@ async def upload_video(
         
         # Check authentication status
         is_authenticated = credentials is not None and user_id is not None
-        logging.info(f"[UPLOAD_START] is_authenticated: {is_authenticated}")
         
         # For logged-in users: check if they have at least 1 token BEFORE upload (base cost is always 1)
         if is_authenticated:
-            import logging
-            logging.info(f"[TOKEN_CHECK_1] Starting pre-upload token check for user_id: {user_id}")
             # Fetch user to check token count
             from src.shared.auth.database import User
             db = next(get_db())
@@ -711,38 +692,22 @@ async def upload_video(
                         status_code=401,
                         detail="User not found"
                     )
-                logging.info(f"[TOKEN_CHECK_1] User found, tokens_remaining: {user.tokens_remaining}")
                 # Reset tokens if it's a new day
                 tokens_before = user.tokens_remaining
-                logging.info(f"[TOKEN_CHECK_1] Before reset_daily_tokens_if_needed, tokens_before: {tokens_before}")
                 try:
                     reset_daily_tokens_if_needed(user, db)
-                    logging.info(f"[TOKEN_CHECK_1] After reset_daily_tokens_if_needed, user.tokens_remaining: {user.tokens_remaining}")
                 except Exception as e:
-                    logging.error(f"[TOKEN_CHECK_1] ERROR in reset_daily_tokens_if_needed: {str(e)}")
-                    if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                        logging.error(f"[TOKEN_CHECK_1] *** INVALID STATE ERROR DETECTED in reset_daily_tokens_if_needed ***")
                     raise
                 # If tokens were reset, commit the change
                 if tokens_before != user.tokens_remaining:
-                    logging.info(f"[TOKEN_CHECK_1] Tokens were reset ({tokens_before} -> {user.tokens_remaining}), committing...")
                     db.commit()
-                    logging.info(f"[TOKEN_CHECK_1] Commit successful, re-querying user...")
                     # Re-query to get fresh state after commit (refresh can cause invalid state error)
                     user = db.query(User).filter(User.id == user_id).first()
-                    if user:
-                        logging.info(f"[TOKEN_CHECK_1] Re-queried user, tokens_remaining: {user.tokens_remaining}")
-                    else:
-                        logging.error(f"[TOKEN_CHECK_1] User not found after re-query!")
                 # Quick check: ensure user has at least 1 token before upload
                 # Full check with file size will happen after upload
                 try:
                     token_count = user.tokens_remaining
-                    logging.info(f"[TOKEN_CHECK_1] Reading user.tokens_remaining: {token_count}")
                 except Exception as e:
-                    logging.error(f"[TOKEN_CHECK_1] *** ERROR reading user.tokens_remaining: {str(e)} ***")
-                    if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                        logging.error(f"[TOKEN_CHECK_1] *** INVALID STATE ERROR DETECTED when reading tokens_remaining ***")
                     raise
                 if token_count < 1:
                     db.close()
@@ -823,8 +788,6 @@ async def upload_video(
         
         # Full token check for logged-in users (after we know file size)
         if is_authenticated:
-            import logging
-            logging.info(f"[TOKEN_CHECK_2] Starting post-upload token check for user_id: {user_id}, file_size: {file_size}")
             # Re-fetch user from DB in this session to get latest token count
             # (user object from earlier session is detached, so we need to query again)
             db = next(get_db())
@@ -839,38 +802,21 @@ async def upload_video(
                         status_code=401,
                         detail="User not found"
                     )
-                logging.info(f"[TOKEN_CHECK_2] User found, tokens_remaining: {current_user.tokens_remaining}")
                 # Reset tokens if it's a new day
                 tokens_before = current_user.tokens_remaining
-                logging.info(f"[TOKEN_CHECK_2] Before reset_daily_tokens_if_needed, tokens_before: {tokens_before}")
                 try:
                     reset_daily_tokens_if_needed(current_user, db)
-                    logging.info(f"[TOKEN_CHECK_2] After reset_daily_tokens_if_needed, current_user.tokens_remaining: {current_user.tokens_remaining}")
                 except Exception as e:
-                    logging.error(f"[TOKEN_CHECK_2] ERROR in reset_daily_tokens_if_needed: {str(e)}")
-                    if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                        logging.error(f"[TOKEN_CHECK_2] *** INVALID STATE ERROR DETECTED in reset_daily_tokens_if_needed ***")
                     raise
                 # If tokens were reset, commit the change
                 if tokens_before != current_user.tokens_remaining:
-                    logging.info(f"[TOKEN_CHECK_2] Tokens were reset ({tokens_before} -> {current_user.tokens_remaining}), committing...")
                     db.commit()
-                    logging.info(f"[TOKEN_CHECK_2] Commit successful, re-querying user...")
                     # Re-query to get fresh state after commit (refresh can cause invalid state error)
                     current_user = db.query(User).filter(User.id == user_id).first()
-                    if current_user:
-                        logging.info(f"[TOKEN_CHECK_2] Re-queried user, tokens_remaining: {current_user.tokens_remaining}")
-                    else:
-                        logging.error(f"[TOKEN_CHECK_2] User not found after re-query!")
                 token_cost = calculate_token_cost(file_size)
-                logging.info(f"[TOKEN_CHECK_2] Token cost calculated: {token_cost}")
                 try:
                     token_count_check = current_user.tokens_remaining
-                    logging.info(f"[TOKEN_CHECK_2] Reading current_user.tokens_remaining for check: {token_count_check}")
                 except Exception as e:
-                    logging.error(f"[TOKEN_CHECK_2] *** ERROR reading current_user.tokens_remaining: {str(e)} ***")
-                    if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                        logging.error(f"[TOKEN_CHECK_2] *** INVALID STATE ERROR DETECTED when reading tokens_remaining ***")
                     raise
                 if token_count_check < token_cost:
                     if os.path.exists(temp_path):
@@ -1006,10 +952,7 @@ async def upload_video(
                 db.close()
         else:
             # Deduct tokens for logged-in users
-            import logging
-            logging.info(f"[TOKEN_DEDUCTION] Starting token deduction for user_id: {user_id}, file_size: {file_size}")
             token_cost = calculate_token_cost(file_size)
-            logging.info(f"[TOKEN_DEDUCTION] Token cost: {token_cost}")
             db = next(get_db())
             try:
                 # Re-fetch user from DB in this session to get latest token count
@@ -1017,115 +960,71 @@ async def upload_video(
                 from src.shared.auth.database import User
                 current_user = db.query(User).filter(User.id == user_id).first()
                 if not current_user:
-                    logging.error(f"[TOKEN_DEDUCTION] User {user_id} not found when trying to deduct tokens")
                     tokens_used = None
                     tokens_remaining = None
                 else:
                     # Store initial token count before any modifications
                     try:
                         initial_tokens = current_user.tokens_remaining
-                        logging.info(f"[TOKEN_DEDUCTION] Initial tokens: {initial_tokens}")
                     except Exception as e:
-                        logging.error(f"[TOKEN_DEDUCTION] *** ERROR reading initial_tokens: {str(e)} ***")
-                        if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                            logging.error(f"[TOKEN_DEDUCTION] *** INVALID STATE ERROR DETECTED when reading initial_tokens ***")
                         raise
                     
                     # Reset tokens if it's a new day (in case day changed during analysis)
                     try:
                         reset_daily_tokens_if_needed(current_user, db)
-                        logging.info(f"[TOKEN_DEDUCTION] After reset_daily_tokens_if_needed, current_user.tokens_remaining: {current_user.tokens_remaining}")
                     except Exception as e:
-                        logging.error(f"[TOKEN_DEDUCTION] *** ERROR in reset_daily_tokens_if_needed: {str(e)} ***")
-                        if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                            logging.error(f"[TOKEN_DEDUCTION] *** INVALID STATE ERROR DETECTED in reset_daily_tokens_if_needed ***")
                         raise
                     
                     # Check if tokens were reset and get current count
                     try:
                         tokens_after_reset = current_user.tokens_remaining
-                        logging.info(f"[TOKEN_DEDUCTION] Tokens after reset check: {tokens_after_reset} (initial: {initial_tokens})")
                     except Exception as e:
-                        logging.error(f"[TOKEN_DEDUCTION] *** ERROR reading tokens_after_reset: {str(e)} ***")
-                        if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                            logging.error(f"[TOKEN_DEDUCTION] *** INVALID STATE ERROR DETECTED when reading tokens_after_reset ***")
                         raise
                     
                     if initial_tokens != tokens_after_reset:
                         # Tokens were reset, commit and re-query
-                        logging.info(f"[TOKEN_DEDUCTION] Tokens were reset ({initial_tokens} -> {tokens_after_reset}), committing...")
                         db.commit()
-                        logging.info(f"[TOKEN_DEDUCTION] Commit successful, re-querying user...")
                         # Re-query to get fresh state after commit (prevents invalid state error)
                         current_user = db.query(User).filter(User.id == user_id).first()
                         if not current_user:
                             raise ValueError(f"User {user_id} not found after token reset")
                         try:
                             initial_tokens = current_user.tokens_remaining
-                            logging.info(f"[TOKEN_DEDUCTION] Re-queried user, initial_tokens updated: {initial_tokens}")
                         except Exception as e:
-                            logging.error(f"[TOKEN_DEDUCTION] *** ERROR reading initial_tokens after re-query: {str(e)} ***")
-                            if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                                logging.error(f"[TOKEN_DEDUCTION] *** INVALID STATE ERROR DETECTED when reading initial_tokens after re-query ***")
                             raise
                     
                     # Calculate final token count after deduction (use initial_tokens to avoid accessing expired object)
                     final_token_count = max(0, initial_tokens - token_cost)
-                    logging.info(f"[TOKEN_DEDUCTION] Final token count calculated: {final_token_count} (initial: {initial_tokens}, cost: {token_cost})")
                     
                     # Deduct tokens
                     current_user.tokens_remaining = final_token_count
-                    logging.info(f"[TOKEN_DEDUCTION] Set current_user.tokens_remaining to {final_token_count}, committing...")
                     # Commit the token deduction
                     db.commit()
-                    logging.info(f"[TOKEN_DEDUCTION] Commit successful")
                     
                     # Use the calculated value instead of reading from expired object
                     tokens_used = round(token_cost, 1)
                     tokens_remaining = int(final_token_count)
-                    logging.info(f"[TOKEN_DEDUCTION] Token deduction complete - used: {tokens_used}, remaining: {tokens_remaining}")
             except Exception as e:
                 db.rollback()
                 import logging
-                logging.error(f"[TOKEN_DEDUCTION] *** FAILED to deduct tokens: {str(e)} ***")
-                if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                    logging.error(f"[TOKEN_DEDUCTION] *** INVALID STATE ERROR DETECTED in token deduction ***")
-                import traceback
-                logging.error(f"[TOKEN_DEDUCTION] Traceback: {traceback.format_exc()}")
+                logging.error(f"Failed to deduct tokens: {str(e)}")
                 # Set tokens to None on error so response doesn't include invalid data
                 tokens_used = None
                 tokens_remaining = None
             finally:
                 db.close()
-                logging.info(f"[TOKEN_DEDUCTION] Database session closed")
         
         response = _build_response(exercise, file_info, file_size, frame_count, Path(output_path),
                                   output_filename, calc_results, cam_info, form_analysis, squat_phases, visualization_url)
         
         # Add token information to response if user is logged in
-        import logging
-        logging.info(f"[RESPONSE] is_authenticated: {is_authenticated}, tokens_used: {tokens_used}, tokens_remaining: {tokens_remaining}")
         if is_authenticated:
             if tokens_used is not None and tokens_remaining is not None:
                 response["tokens_used"] = tokens_used
                 response["tokens_remaining"] = tokens_remaining
-                logging.info(f"[RESPONSE] Added tokens to response - used: {tokens_used}, remaining: {tokens_remaining}")
-            else:
-                logging.warning(f"[RESPONSE] User authenticated but tokens_used or tokens_remaining is None - not adding to response")
         
         return response
     except Exception as e:
-        import logging
-        import traceback
-        error_msg = str(e)
-        error_type = type(e).__name__
-        logging.error(f"[UPLOAD_ERROR] ===== EXCEPTION CAUGHT IN UPLOAD ENDPOINT =====")
-        logging.error(f"[UPLOAD_ERROR] Error type: {error_type}")
-        logging.error(f"[UPLOAD_ERROR] Error message: {error_msg}")
-        logging.error(f"[UPLOAD_ERROR] Full traceback:")
-        logging.error(traceback.format_exc())
-        if "invalid state" in error_msg.lower() or "detached" in error_msg.lower() or "InvalidStateError" in error_type:
-            logging.error(f"[UPLOAD_ERROR] *** INVALID STATE ERROR DETECTED IN MAIN EXCEPTION HANDLER ***")
         _handle_upload_errors(e)
     finally:
         if temp_path and os.path.exists(temp_path):

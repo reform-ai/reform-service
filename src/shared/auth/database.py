@@ -92,17 +92,12 @@ def get_db():
 
 def reset_daily_tokens_if_needed(user: User, db) -> None:
     """Reset user's tokens to 10 if it's a new day. Does NOT commit - caller must commit."""
-    import logging
     try:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         try:
             last_reset = user.last_token_reset
-            logging.info(f"[RESET_TOKENS] last_reset: {last_reset}, user.tokens_remaining: {user.tokens_remaining}")
         except Exception as e:
-            logging.error(f"[RESET_TOKENS] *** ERROR accessing user.last_token_reset or user.tokens_remaining: {str(e)} ***")
-            if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                logging.error(f"[RESET_TOKENS] *** INVALID STATE ERROR DETECTED when accessing user attributes ***")
             raise
         
         # Check if it's a new day (compare dates, not times)
@@ -113,17 +108,12 @@ def reset_daily_tokens_if_needed(user: User, db) -> None:
             
             # Reset if it's a different day
             if last_reset.date() < now.date():
-                logging.info(f"[RESET_TOKENS] New day detected, resetting tokens from {user.tokens_remaining} to 10")
                 user.tokens_remaining = 10
                 user.last_token_reset = now
-                logging.info(f"[RESET_TOKENS] Tokens reset complete, user.tokens_remaining: {user.tokens_remaining}")
                 # Don't commit here - let the caller commit after all changes
     except Exception as e:
-        logging.error(f"[RESET_TOKENS] *** ERROR in reset_daily_tokens_if_needed: {str(e)} ***")
-        if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-            logging.error(f"[RESET_TOKENS] *** INVALID STATE ERROR DETECTED in reset_daily_tokens_if_needed ***")
-        import traceback
-        logging.error(f"[RESET_TOKENS] Traceback: {traceback.format_exc()}")
+        import logging
+        logging.error(f"Error in reset_daily_tokens_if_needed: {str(e)}")
         raise
 
 

@@ -148,50 +148,32 @@ async def get_current_user_info(
     db: Session = Depends(get_db)
 ):
     """Get current user information."""
-    import logging
-    logging.info(f"[AUTH_ME] ===== GET /api/auth/me CALLED =====")
     try:
         # Reset tokens if it's a new day
         from src.shared.auth.database import reset_daily_tokens_if_needed
         try:
             tokens_before = current_user.tokens_remaining
-            logging.info(f"[AUTH_ME] tokens_before: {tokens_before}")
         except Exception as e:
-            logging.error(f"[AUTH_ME] *** ERROR reading tokens_before: {str(e)} ***")
-            if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                logging.error(f"[AUTH_ME] *** INVALID STATE ERROR DETECTED when reading tokens_before ***")
             raise
         
         reset_daily_tokens_if_needed(current_user, db)
         
         try:
             tokens_after_reset = current_user.tokens_remaining
-            logging.info(f"[AUTH_ME] tokens_after_reset: {tokens_after_reset}")
         except Exception as e:
-            logging.error(f"[AUTH_ME] *** ERROR reading tokens_after_reset: {str(e)} ***")
-            if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                logging.error(f"[AUTH_ME] *** INVALID STATE ERROR DETECTED when reading tokens_after_reset ***")
             raise
         
         # If tokens were reset, commit the change
         if tokens_before != tokens_after_reset:
-            logging.info(f"[AUTH_ME] Tokens were reset ({tokens_before} -> {tokens_after_reset}), committing...")
             db.commit()
-            logging.info(f"[AUTH_ME] Commit successful, re-querying user...")
             # Re-query to get fresh state after commit (refresh can cause invalid state error)
             current_user = db.query(User).filter(User.id == current_user.id).first()
             if not current_user:
-                logging.error(f"[AUTH_ME] User not found after re-query!")
                 raise HTTPException(status_code=404, detail="User not found")
-            logging.info(f"[AUTH_ME] Re-queried user, tokens_remaining: {current_user.tokens_remaining}")
         
         try:
             final_tokens = current_user.tokens_remaining
-            logging.info(f"[AUTH_ME] Final tokens_remaining: {final_tokens}")
         except Exception as e:
-            logging.error(f"[AUTH_ME] *** ERROR reading final tokens_remaining: {str(e)} ***")
-            if "invalid state" in str(e).lower() or "detached" in str(e).lower():
-                logging.error(f"[AUTH_ME] *** INVALID STATE ERROR DETECTED when reading final tokens_remaining ***")
             raise
         
         return UserResponse(
@@ -202,12 +184,11 @@ async def get_current_user_info(
             created_at=current_user.created_at.isoformat() if current_user.created_at else None,
             tokens_remaining=final_tokens
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        logging.error(f"[AUTH_ME] *** EXCEPTION in get_current_user_info: {str(e)} ***")
-        logging.error(f"[AUTH_ME] Traceback: {traceback.format_exc()}")
-        if "invalid state" in str(e).lower() or "detached" in str(e).lower() or "InvalidStateError" in type(e).__name__:
-            logging.error(f"[AUTH_ME] *** INVALID STATE ERROR DETECTED IN /api/auth/me ***")
+        import logging
+        logging.error(f"Error in get_current_user_info: {str(e)}", exc_info=True)
         raise
 
 
