@@ -19,7 +19,9 @@ from src.shared.social.schemas import (
     FollowResponse,
     PrivacyUpdate,
     PrivacyResponse,
-    FeedResponse
+    FeedResponse,
+    FollowerInfo,
+    FollowersResponse
 )
 
 router = APIRouter(prefix="/api/social", tags=["social"])
@@ -687,4 +689,78 @@ async def get_privacy(
 ):
     """Get current user privacy setting."""
     return PrivacyResponse(is_public=current_user.is_public)
+
+
+@router.get("/users/me/followers", response_model=FollowersResponse)
+async def get_my_followers(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get list of users who follow the current user."""
+    # Get all follows where current_user is being followed
+    follows = db.query(Follow).filter(
+        Follow.following_id == current_user.id
+    ).all()
+    
+    # Get user IDs of followers
+    follower_ids = [follow.follower_id for follow in follows]
+    
+    if not follower_ids:
+        return FollowersResponse(followers=[], total=0)
+    
+    # Get user details for all followers
+    followers = db.query(User).filter(User.id.in_(follower_ids)).all()
+    
+    # Get list of users that current_user follows (to check is_following_back)
+    following_ids = db.query(Follow.following_id).filter(
+        Follow.follower_id == current_user.id
+    ).all()
+    following_ids_set = {row[0] for row in following_ids}
+    
+    # Build response
+    follower_list = []
+    for user in followers:
+        follower_list.append(FollowerInfo(
+            id=user.id,
+            user_id=user.id,
+            username=user.username,
+            full_name=user.full_name or user.email or "Unknown User",
+            is_following_back=user.id in following_ids_set
+        ))
+    
+    return FollowersResponse(followers=follower_list, total=len(follower_list))
+
+
+@router.get("/users/me/following", response_model=FollowersResponse)
+async def get_my_following(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get list of users the current user is following."""
+    # Get all follows where current_user is the follower
+    follows = db.query(Follow).filter(
+        Follow.follower_id == current_user.id
+    ).all()
+    
+    # Get user IDs of users being followed
+    following_ids = [follow.following_id for follow in follows]
+    
+    if not following_ids:
+        return FollowersResponse(followers=[], total=0)
+    
+    # Get user details for all users being followed
+    following_users = db.query(User).filter(User.id.in_(following_ids)).all()
+    
+    # Build response (is_following_back is always True since we're following them)
+    following_list = []
+    for user in following_users:
+        following_list.append(FollowerInfo(
+            id=user.id,
+            user_id=user.id,
+            username=user.username,
+            full_name=user.full_name or user.email or "Unknown User",
+            is_following_back=True  # Always true since we're following them
+        ))
+    
+    return FollowersResponse(followers=following_list, total=len(following_list))
 
