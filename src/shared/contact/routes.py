@@ -6,24 +6,24 @@ import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
-from typing import Dict, Optional
-from collections import defaultdict
-from fastapi import APIRouter, HTTPException, status, Depends, Request, Security
+from typing import Optional
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, func
 
 from src.shared.contact.schemas import ContactRequest, ContactResponse
+from src.shared.contact.database import ContactRateLimit
 from src.shared.auth.database import get_db
 from src.shared.auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/contact", tags=["contact"])
 security = HTTPBearer(auto_error=False)
 
-# Rate limiting: track requests by IP address
-# In production, consider using Redis or database for distributed rate limiting
-rate_limit_store: Dict[str, list] = defaultdict(list)
+# Rate limiting configuration
 RATE_LIMIT_MAX_REQUESTS = 3  # Max 3 messages per hour
 RATE_LIMIT_WINDOW = timedelta(hours=1)
+RATE_LIMIT_CLEANUP_AGE = timedelta(days=1)  # Clean up entries older than 1 day
 
 
 def get_client_ip(request: Request) -> str:
@@ -37,21 +37,84 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def check_rate_limit(ip_address: str) -> bool:
-    """Check if IP address has exceeded rate limit."""
-    now = datetime.now()
-    # Clean old entries
-    rate_limit_store[ip_address] = [
-        timestamp for timestamp in rate_limit_store[ip_address]
-        if now - timestamp < RATE_LIMIT_WINDOW
-    ]
+def check_rate_limit(db: Session, ip_address: str, email: Optional[str] = None) -> bool:
+    """
+    Check if IP address or email has exceeded rate limit.
+    Uses database-backed rate limiting that works across multiple dynos.
     
-    # Check if limit exceeded
-    if len(rate_limit_store[ip_address]) >= RATE_LIMIT_MAX_REQUESTS:
+    Args:
+        db: Database session
+        ip_address: Client IP address
+        email: Optional email address (for additional rate limiting by email)
+    
+    Returns:
+        True if within rate limit, False if exceeded
+    """
+    now = datetime.utcnow()
+    window_start = now - RATE_LIMIT_WINDOW
+    
+    # Clean up old entries (older than RATE_LIMIT_CLEANUP_AGE)
+    cleanup_threshold = now - RATE_LIMIT_CLEANUP_AGE
+    try:
+        db.query(ContactRateLimit).filter(
+            ContactRateLimit.created_at < cleanup_threshold
+        ).delete()
+        db.commit()
+    except Exception as e:
+        logging.warning(f"Failed to cleanup old rate limit entries: {str(e)}")
+        db.rollback()
+    
+    # Check rate limit by IP address
+    ip_count = db.query(func.count(ContactRateLimit.id)).filter(
+        and_(
+            ContactRateLimit.id == ip_address,
+            ContactRateLimit.identifier_type == 'ip',
+            ContactRateLimit.created_at >= window_start
+        )
+    ).scalar() or 0
+    
+    if ip_count >= RATE_LIMIT_MAX_REQUESTS:
         return False
     
-    # Add current request
-    rate_limit_store[ip_address].append(now)
+    # Also check rate limit by email if provided (stricter limit)
+    if email:
+        email_count = db.query(func.count(ContactRateLimit.id)).filter(
+            and_(
+                ContactRateLimit.id == email.lower(),
+                ContactRateLimit.identifier_type == 'email',
+                ContactRateLimit.created_at >= window_start
+            )
+        ).scalar() or 0
+        
+        if email_count >= RATE_LIMIT_MAX_REQUESTS:
+            return False
+    
+    # Record this request
+    try:
+        # Record IP address
+        ip_record = ContactRateLimit(
+            id=ip_address,
+            identifier_type='ip',
+            created_at=now
+        )
+        db.add(ip_record)
+        
+        # Also record email if provided
+        if email:
+            email_record = ContactRateLimit(
+                id=email.lower(),
+                identifier_type='email',
+                created_at=now
+            )
+            db.add(email_record)
+        
+        db.commit()
+    except Exception as e:
+        logging.error(f"Failed to record rate limit: {str(e)}")
+        db.rollback()
+        # Don't fail the request if rate limit recording fails
+        # But log it for monitoring
+    
     return True
 
 
@@ -119,17 +182,27 @@ async def submit_contact_form(
     Submit contact form message to support@reformgym.fit.
     
     Features:
-    - Rate limiting: Max 3 messages per hour per IP address
+    - Database-backed rate limiting: Max 3 messages per hour per IP address and email
+    - Works across multiple server instances/dynos
     - Input validation and sanitization
     - Secure email sending via SMTP
     - Optional: If user is logged in, their account info is included
     """
-    # Rate limiting check
+    # Ensure contact rate limit table exists (fallback if startup init failed)
+    try:
+        from src.shared.contact.database import Base as ContactBase
+        from src.shared.auth.database import engine
+        ContactBase.metadata.create_all(bind=engine, checkfirst=True)
+    except Exception as e:
+        logging.warning(f"Contact table creation check failed: {str(e)}")
+        # Continue anyway - rate limiting will fail gracefully
+    
+    # Rate limiting check (by IP and email)
     client_ip = get_client_ip(request)
-    if not check_rate_limit(client_ip):
+    if not check_rate_limit(db, client_ip, contact_data.email):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Please wait before sending another message. (Max {RATE_LIMIT_MAX_REQUESTS} messages per hour)"
+            detail=f"Rate limit exceeded. Please wait before sending another message. (Max {RATE_LIMIT_MAX_REQUESTS} messages per hour per IP address or email)"
         )
     
     # Optional: Get user info if logged in

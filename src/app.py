@@ -48,6 +48,9 @@ async def startup_event():
         from src.shared.social.database import Base as SocialBase
         from src.shared.auth.database import engine
         SocialBase.metadata.create_all(bind=engine, checkfirst=True)
+        # Initialize contact rate limiting tables
+        from src.shared.contact.database import Base as ContactBase
+        ContactBase.metadata.create_all(bind=engine, checkfirst=True)
         logging.info("Database initialization completed on startup")
     except Exception as e:
         # Log error but don't crash the app

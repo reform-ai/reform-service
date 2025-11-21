@@ -84,24 +84,8 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
         )
         
         db.add(new_user)
-        db.flush()  # Flush to get user ID before adding tokens
-        
-        # Give 10 monthly tokens as signup bonus (expires in 30 days)
-        from datetime import timedelta, timezone
-        from src.shared.payment.token_utils import add_tokens
-        
-        expires_at = datetime.now(timezone.utc) + timedelta(days=30)
-        add_tokens(
-            db=db,
-            user_id=user_id,
-            amount=10,
-            token_type='free',
-            source='monthly_allotment',
-            expires_at=expires_at,
-            metadata={'signup_bonus': True, 'allotment_period': 'monthly'}  # This parameter name is fine, it gets mapped to meta_data in the model
-        )
-        
         db.commit()
+        # Note: Tokens are NOT granted at signup. User must click "Get 10 Free Tokens" button on profile page.
         # No need to refresh - we have all the values we need
         
         # Create access token

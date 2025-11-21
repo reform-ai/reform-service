@@ -58,6 +58,8 @@ class User(Base):
     # Token system: users get 10 tokens per day
     tokens_remaining = Column(Integer, default=10, nullable=False)
     last_token_reset = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Token activation: when user first activates their token system (one-time, lifetime)
+    token_activation_date = Column(DateTime, nullable=True)  # Null until user clicks "Get 10 Free Tokens"
     # Payment-related columns (prepared for future Stripe integration)
     stripe_customer_id = Column(String, unique=True, nullable=True)  # Stripe customer ID (for future use)
     subscription_status = Column(String, nullable=True)  # 'none', 'active', 'canceled', 'past_due' (for future use)

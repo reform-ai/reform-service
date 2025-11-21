@@ -446,9 +446,12 @@ def grant_monthly_tokens_if_needed(db: Session, user_id: str) -> Optional[TokenT
     """
     Check if monthly tokens need to be granted. Users can have a maximum of 10 monthly tokens.
     Grants 10 new tokens if:
-    1. 30 days have passed since the last grant, AND
-    2. Current monthly token balance is less than 10
+    1. User has activated their token system (token_activation_date is set), AND
+    2. 30 days have passed since the user's token activation date (or last grant cycle), AND
+    3. Current monthly token balance is less than 10
     
+    Token grants are based on the user's token_activation_date, not signup date.
+    This ensures consistent monthly grants aligned with when the user activated their token system.
     Old tokens expire first (FIFO), so we only grant when balance drops below 10.
     Each grant expires 30 days from the grant date.
     
@@ -460,6 +463,7 @@ def grant_monthly_tokens_if_needed(db: Session, user_id: str) -> Optional[TokenT
         TokenTransaction if tokens were granted, None otherwise
     """
     from datetime import timedelta
+    from src.shared.auth.database import User
     
     now = datetime.now(timezone.utc)
     
@@ -472,6 +476,24 @@ def grant_monthly_tokens_if_needed(db: Session, user_id: str) -> Optional[TokenT
     if monthly_balance >= 10:
         return None
     
+    # Get user's token activation date
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.token_activation_date:
+        # User hasn't activated token system yet
+        return None
+    
+    activation_date = user.token_activation_date
+    if activation_date.tzinfo is None:
+        activation_date = activation_date.replace(tzinfo=timezone.utc)
+    
+    # Calculate how many 30-day periods have passed since activation
+    days_since_activation = (now - activation_date).days
+    periods_since_activation = days_since_activation // 30
+    
+    # Calculate the next expected grant date based on activation
+    # Grant dates: activation, activation+30, activation+60, activation+90, etc.
+    next_expected_grant_date = activation_date + timedelta(days=(periods_since_activation + 1) * 30)
+    
     # Find the most recent monthly_allotment credit transaction
     last_grant = db.query(TokenTransaction).filter(
         and_(
@@ -482,19 +504,25 @@ def grant_monthly_tokens_if_needed(db: Session, user_id: str) -> Optional[TokenT
         )
     ).order_by(TokenTransaction.created_at.desc()).first()
     
-    # Check if 30 days have passed since last grant (or if no previous grant exists)
+    # Determine if we should grant tokens
     should_grant = False
+    
     if not last_grant:
-        # First time - grant tokens
-        should_grant = True
+        # No previous grant - grant if we're past the activation date
+        if now >= activation_date:
+            should_grant = True
     else:
-        # Check if 30 days have passed since last grant
+        # Check if we're past the next expected grant date (based on activation)
         last_grant_date = last_grant.created_at
         if last_grant_date.tzinfo is None:
             last_grant_date = last_grant_date.replace(tzinfo=timezone.utc)
         
-        days_since_grant = (now - last_grant_date).days
-        if days_since_grant >= 30:
+        days_since_last_grant = (now - last_grant_date).days
+        
+        # Grant if:
+        # 1. We're past the next expected grant date (aligned with activation), AND
+        # 2. At least 30 days have passed since the last grant (safety check)
+        if now >= next_expected_grant_date and days_since_last_grant >= 30:
             should_grant = True
     
     if should_grant:
@@ -507,7 +535,7 @@ def grant_monthly_tokens_if_needed(db: Session, user_id: str) -> Optional[TokenT
             token_type='free',
             source='monthly_allotment',
             expires_at=expires_at,
-            metadata={'monthly_grant': True, 'grant_date': now.isoformat()}
+            metadata={'monthly_grant': True, 'grant_date': now.isoformat(), 'based_on_activation': activation_date.isoformat()}
         )
     
     return None

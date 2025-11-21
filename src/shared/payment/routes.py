@@ -9,8 +9,10 @@ from src.shared.auth.database import User
 from src.shared.payment.token_utils import (
     calculate_token_balance,
     get_token_transactions,
-    TokenBalance
+    TokenBalance,
+    add_tokens
 )
+from datetime import timedelta
 
 router = APIRouter(prefix="/api/tokens", tags=["tokens"])
 
@@ -23,10 +25,31 @@ async def get_token_balance(
     """
     Get detailed token balance breakdown for current user.
     Returns breakdown by source type.
+    If user hasn't activated token system, returns is_activated: false.
     """
     from datetime import datetime, timezone, timedelta
     from sqlalchemy import func, and_, or_
     from src.shared.payment.database import TokenTransaction
+    
+    # Check if user has activated token system
+    if not current_user.token_activation_date:
+        return {
+            "is_activated": False,
+            "message": "Token system not activated. Click 'Get 10 Free Tokens' on your profile page to activate.",
+            "total": 0,
+            "breakdown": {
+                "monthly_allotment": 0,
+                "other_free": 0,
+                "purchased": 0
+            },
+            "expiration_dates": {
+                "monthly_allotment": None,
+                "other_free": None,
+                "purchased": None
+            },
+            "free_total": 0,
+            "purchased_total": 0
+        }
     
     now = datetime.now(timezone.utc)
     
@@ -194,6 +217,7 @@ async def get_token_balance(
     purchased_tokens = balance.purchased_tokens
     
     return {
+        "is_activated": True,
         "total": balance.total,
         "breakdown": {
             "monthly_allotment": monthly_tokens,
@@ -237,5 +261,50 @@ async def get_token_transactions_history(
         ],
         "limit": limit,
         "offset": offset
+    }
+
+
+@router.post("/activate")
+async def activate_tokens(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict:
+    """
+    Activate token system for user (one-time, lifetime).
+    Grants 10 free monthly tokens and sets token_activation_date.
+    Can only be called once per user.
+    """
+    from datetime import datetime, timezone
+    
+    # Check if already activated
+    if current_user.token_activation_date is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token system already activated. This can only be done once."
+        )
+    
+    # Set activation date
+    now = datetime.now(timezone.utc)
+    current_user.token_activation_date = now
+    
+    # Grant 10 monthly tokens (expires in 30 days)
+    expires_at = now + timedelta(days=30)
+    add_tokens(
+        db=db,
+        user_id=current_user.id,
+        amount=10,
+        token_type='free',
+        source='monthly_allotment',
+        expires_at=expires_at,
+        metadata={'initial_activation': True, 'activation_date': now.isoformat()}
+    )
+    
+    db.commit()
+    
+    return {
+        "message": "Token system activated successfully",
+        "tokens_granted": 10,
+        "activation_date": now.isoformat(),
+        "expires_at": expires_at.isoformat()
     }
 
