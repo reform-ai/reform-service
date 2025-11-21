@@ -19,10 +19,11 @@ from src.shared.upload_video.upload_video import (
 )
 # Import exercise registry - this will auto-register exercises
 from src.shared.exercises import get_exercise, EXERCISES
-from src.shared.auth.database import init_db, get_db, reset_daily_tokens_if_needed, reset_daily_anonymous_limit_if_needed, calculate_token_cost, AnonymousAnalysis
+from src.shared.auth.database import init_db, get_db, reset_daily_anonymous_limit_if_needed, calculate_token_cost, AnonymousAnalysis
 from src.shared.auth.routes import router as auth_router
 from src.shared.auth.dependencies import security
 from src.shared.social.routes import router as social_router
+from src.shared.payment.routes import router as payment_router
 from fastapi.security import HTTPAuthorizationCredentials
 
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -59,6 +60,9 @@ app.include_router(auth_router)
 
 # Include social feed routes
 app.include_router(social_router)
+
+# Include payment/token routes
+app.include_router(payment_router)
 
 # Use /tmp/outputs on Heroku (ephemeral filesystem), otherwise use local outputs directory
 if os.environ.get("DYNO"):  # Heroku sets DYNO environment variable
@@ -839,8 +843,9 @@ async def upload_video(
         
         # For logged-in users: check if they have at least 1 token BEFORE upload (base cost is always 1)
         if is_authenticated:
-            # Fetch user to check token count
+            # Fetch user to check token count using new transaction system
             from src.shared.auth.database import User
+            from src.shared.payment.token_utils import calculate_token_balance, has_sufficient_tokens
             db = next(get_db())
             try:
                 user = db.query(User).filter(User.id == user_id).first()
@@ -850,33 +855,19 @@ async def upload_video(
                         status_code=401,
                         detail="User not found"
                     )
-                # Reset tokens if it's a new day
-                tokens_before = user.tokens_remaining
-                try:
-                    reset_daily_tokens_if_needed(user, db)
-                except Exception as e:
-                    raise
-                # If tokens were reset, commit the change
-                if tokens_before != user.tokens_remaining:
-                    db.commit()
-                    # Re-query to get fresh state after commit (refresh can cause invalid state error)
-                    user = db.query(User).filter(User.id == user_id).first()
-                # Quick check: ensure user has at least 1 token before upload
-                # Full check with file size will happen after upload
-                try:
-                    token_count = user.tokens_remaining
-                except Exception as e:
-                    raise
-                if token_count < 1:
+                # Check token balance using transaction system
+                if not has_sufficient_tokens(db, user_id, 1):
+                    balance = calculate_token_balance(db, user_id)
                     db.close()
                     raise HTTPException(
                         status_code=402,
                         detail={
                             "error": "insufficient_tokens",
-                            "message": f"Insufficient tokens. You need at least 1 token but only have {token_count} remaining.",
+                            "message": f"Insufficient tokens. You need at least 1 token but only have {balance.total} remaining.",
                             "tokens_required": 1,
-                            "tokens_remaining": token_count,
-                            "tokens_reset": "Daily tokens reset at midnight UTC"
+                            "tokens_remaining": balance.total,
+                            "free_tokens": balance.free_tokens,
+                            "purchased_tokens": balance.purchased_tokens
                         }
                     )
             except HTTPException:
@@ -970,23 +961,13 @@ async def upload_video(
                         status_code=401,
                         detail="User not found"
                     )
-                # Reset tokens if it's a new day
-                tokens_before = current_user.tokens_remaining
-                try:
-                    reset_daily_tokens_if_needed(current_user, db)
-                except Exception as e:
-                    raise
-                # If tokens were reset, commit the change
-                if tokens_before != current_user.tokens_remaining:
-                    db.commit()
-                    # Re-query to get fresh state after commit (refresh can cause invalid state error)
-                    current_user = db.query(User).filter(User.id == user_id).first()
+                # Check tokens using new transaction system
+                from src.shared.payment.token_utils import calculate_token_balance, has_sufficient_tokens
                 token_cost = calculate_token_cost(file_size)
-                try:
-                    token_count_check = current_user.tokens_remaining
-                except Exception as e:
-                    raise
-                if token_count_check < token_cost:
+                token_cost_int = int(token_cost) + (1 if token_cost % 1 > 0 else 0)
+                
+                if not has_sufficient_tokens(db, user_id, token_cost_int):
+                    balance = calculate_token_balance(db, user_id)
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
                     db.close()
@@ -994,10 +975,11 @@ async def upload_video(
                         status_code=402,  # Payment Required
                         detail={
                             "error": "insufficient_tokens",
-                            "message": f"Insufficient tokens. You need {token_cost:.1f} tokens but only have {token_count_check} remaining.",
+                            "message": f"Insufficient tokens. You need {token_cost:.1f} tokens but only have {balance.total} remaining.",
                             "tokens_required": round(token_cost, 1),
-                            "tokens_remaining": token_count_check,
-                            "tokens_reset": "Daily tokens reset at midnight UTC"
+                            "tokens_remaining": balance.total,
+                            "free_tokens": balance.free_tokens,
+                            "purchased_tokens": balance.purchased_tokens
                         }
                     )
             except HTTPException:
@@ -1134,47 +1116,34 @@ async def upload_video(
                     tokens_used = None
                     tokens_remaining = None
                 else:
-                    # Store initial token count before any modifications
-                    try:
-                        initial_tokens = current_user.tokens_remaining
-                    except Exception as e:
-                        raise
+                    # Deduct tokens using the new transaction system
+                    from src.shared.payment.token_utils import deduct_tokens, calculate_token_balance
                     
-                    # Reset tokens if it's a new day (in case day changed during analysis)
-                    try:
-                        reset_daily_tokens_if_needed(current_user, db)
-                    except Exception as e:
-                        raise
+                    # Deduct tokens (round up to nearest integer)
+                    token_cost_int = int(token_cost) + (1 if token_cost % 1 > 0 else 0)
+                    success = deduct_tokens(
+                        db=db,
+                        user_id=user_id,
+                        amount=token_cost_int,
+                        source='analysis_usage',
+                        metadata={'file_size_bytes': file_size, 'exercise': exercise, 'calculated_cost': token_cost}
+                    )
                     
-                    # Check if tokens were reset and get current count
-                    try:
-                        tokens_after_reset = current_user.tokens_remaining
-                    except Exception as e:
-                        raise
-                    
-                    if initial_tokens != tokens_after_reset:
-                        # Tokens were reset, commit and re-query
+                    if not success:
+                        # This shouldn't happen since we checked earlier, but handle it
+                        db.rollback()
+                        import logging
+                        logging.error(f"Failed to deduct tokens for user {user_id}")
+                        tokens_used = None
+                        tokens_remaining = None
+                    else:
+                        # Commit the token deduction
                         db.commit()
-                        # Re-query to get fresh state after commit (prevents invalid state error)
-                        current_user = db.query(User).filter(User.id == user_id).first()
-                        if not current_user:
-                            raise ValueError(f"User {user_id} not found after token reset")
-                        try:
-                            initial_tokens = current_user.tokens_remaining
-                        except Exception as e:
-                            raise
-                    
-                    # Calculate final token count after deduction (use initial_tokens to avoid accessing expired object)
-                    final_token_count = max(0, initial_tokens - token_cost)
-                    
-                    # Deduct tokens
-                    current_user.tokens_remaining = final_token_count
-                    # Commit the token deduction
-                    db.commit()
-                    
-                    # Use the calculated value instead of reading from expired object
-                    tokens_used = round(token_cost, 1)
-                    tokens_remaining = int(final_token_count)
+                        
+                        # Get updated balance
+                        balance = calculate_token_balance(db, user_id)
+                        tokens_used = round(token_cost, 1)
+                        tokens_remaining = balance.total
             except Exception as e:
                 db.rollback()
                 import logging

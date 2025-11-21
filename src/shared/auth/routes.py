@@ -79,11 +79,28 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
             full_name=full_name,
             is_verified=False,  # Email verification to be implemented later
             created_at=datetime.utcnow(),
-            tokens_remaining=10,  # New users start with 10 tokens
+            tokens_remaining=10,  # Keep for backward compatibility, but use transaction system
             last_token_reset=datetime.utcnow()
         )
         
         db.add(new_user)
+        db.flush()  # Flush to get user ID before adding tokens
+        
+        # Give 10 monthly tokens as signup bonus (expires in 30 days)
+        from datetime import timedelta, timezone
+        from src.shared.payment.token_utils import add_tokens
+        
+        expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+        add_tokens(
+            db=db,
+            user_id=user_id,
+            amount=10,
+            token_type='free',
+            source='monthly_allotment',
+            expires_at=expires_at,
+            metadata={'signup_bonus': True, 'allotment_period': 'monthly'}  # This parameter name is fine, it gets mapped to meta_data in the model
+        )
+        
         db.commit()
         # No need to refresh - we have all the values we need
         
@@ -173,32 +190,9 @@ async def get_current_user_info(
 ):
     """Get current user information."""
     try:
-        # Reset tokens if it's a new day
-        from src.shared.auth.database import reset_daily_tokens_if_needed
-        try:
-            tokens_before = current_user.tokens_remaining
-        except Exception as e:
-            raise
-        
-        reset_daily_tokens_if_needed(current_user, db)
-        
-        try:
-            tokens_after_reset = current_user.tokens_remaining
-        except Exception as e:
-            raise
-        
-        # If tokens were reset, commit the change
-        if tokens_before != tokens_after_reset:
-            db.commit()
-            # Re-query to get fresh state after commit (refresh can cause invalid state error)
-            current_user = db.query(User).filter(User.id == current_user.id).first()
-            if not current_user:
-                raise HTTPException(status_code=404, detail="User not found")
-        
-        try:
-            final_tokens = current_user.tokens_remaining
-        except Exception as e:
-            raise
+        # Calculate token balance from transaction system
+        from src.shared.payment.token_utils import calculate_token_balance
+        balance = calculate_token_balance(db, current_user.id)
         
         return UserResponse(
             id=current_user.id,
@@ -211,7 +205,7 @@ async def get_current_user_info(
             favorite_exercise=getattr(current_user, 'favorite_exercise', None),
             community_preference=getattr(current_user, 'community_preference', None),
             created_at=current_user.created_at.isoformat() if current_user.created_at else None,
-            tokens_remaining=final_tokens
+            tokens_remaining=balance.total  # Return total from transaction system
         )
     except HTTPException:
         raise

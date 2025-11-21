@@ -10,6 +10,8 @@ Run migrations in this order if setting up a new database or updating an existin
 2. **migrate_add_social_feed.py** - Creates social feed tables (posts, likes, comments, follows) and adds `is_public` column
 3. **migrate_add_comment_is_deleted.py** - Adds `is_deleted` column to `comments` table for soft delete
 4. **migrate_add_is_pt.py** - Adds `is_pt` column to `users` table for Personal Trainer attribute
+5. **migrate_add_user_profile_attributes.py** - Adds `technical_level`, `favorite_exercise`, `community_preference` to `users` table
+6. **migrate_add_payment_tables.py** - Creates `token_transactions`, `subscriptions`, `payments` tables and adds payment-related columns to `users` table
 
 ## Usage
 

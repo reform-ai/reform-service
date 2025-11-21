@@ -2,7 +2,7 @@
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, List
 from src.shared.payment.database import TokenTransaction
 
@@ -175,7 +175,7 @@ def add_tokens(
         expires_at=expires_at,
         stripe_payment_intent_id=stripe_payment_intent_id,
         stripe_subscription_id=stripe_subscription_id,
-        metadata=metadata
+        meta_data=metadata
     )
     
     db.add(transaction)
@@ -234,7 +234,7 @@ def deduct_tokens(
                 token_type='free',
                 amount=-deduct_amount,
                 source=source,
-                metadata={**(metadata or {}), 'deducted_from': 'monthly_allotment'}
+                meta_data={**(metadata or {}), 'deducted_from': 'monthly_allotment'}
             )
             db.add(debit)
             remaining_to_deduct -= deduct_amount
@@ -252,7 +252,7 @@ def deduct_tokens(
                     token_type='free',
                     amount=-deduct_amount,
                     source=source,
-                    metadata={**(metadata or {}), 'deducted_from': 'promotional'}
+                    meta_data={**(metadata or {}), 'deducted_from': 'promotional'}
                 )
                 db.add(debit)
                 remaining_to_deduct -= deduct_amount
@@ -282,7 +282,7 @@ def deduct_tokens(
                     token_type='free',
                     amount=-deduct_amount,
                     source=source,
-                    metadata={**(metadata or {}), 'deducted_from': 'other_free'}
+                    meta_data={**(metadata or {}), 'deducted_from': 'other_free'}
                 )
                 db.add(debit)
                 remaining_to_deduct -= deduct_amount
@@ -295,7 +295,7 @@ def deduct_tokens(
                 token_type='purchased',
                 amount=-remaining_to_deduct,
                 source=source,
-                metadata={**(metadata or {}), 'deducted_from': 'purchased'}
+                meta_data={**(metadata or {}), 'deducted_from': 'purchased'}
             )
             db.add(debit)
             remaining_to_deduct = 0
@@ -328,7 +328,8 @@ def _calculate_source_balance(
         Net balance for the specified type and source
     """
     if token_type == 'free':
-        credits = db.query(func.coalesce(func.sum(TokenTransaction.amount), 0)).filter(
+        # Get all valid credit transactions for this source (not expired)
+        valid_credits = db.query(TokenTransaction).filter(
             and_(
                 TokenTransaction.user_id == user_id,
                 TokenTransaction.token_type == 'free',
@@ -339,16 +340,34 @@ def _calculate_source_balance(
                     TokenTransaction.expires_at > now
                 )
             )
-        ).scalar() or 0
+        ).all()
         
-        debits = db.query(func.coalesce(func.sum(func.abs(TokenTransaction.amount)), 0)).filter(
-            and_(
-                TokenTransaction.user_id == user_id,
-                TokenTransaction.token_type == 'free',
-                TokenTransaction.source == source,
-                TokenTransaction.amount < 0
-            )
-        ).scalar() or 0
+        credits = sum(t.amount for t in valid_credits)
+        
+        # For each valid credit, find debits that were created during that credit's validity period
+        # Debits can have source='analysis_usage' but metadata['deducted_from']=source
+        from sqlalchemy.dialects.postgresql import JSONB
+        debits = 0
+        for credit in valid_credits:
+            credit_created = credit.created_at
+            credit_expires = credit.expires_at or (now + timedelta(days=365))  # If no expiration, use far future
+            
+            # Find debits created during this credit's validity period
+            debits_for_this_credit = db.query(func.coalesce(func.sum(func.abs(TokenTransaction.amount)), 0)).filter(
+                and_(
+                    TokenTransaction.user_id == user_id,
+                    TokenTransaction.token_type == 'free',
+                    TokenTransaction.amount < 0,
+                    TokenTransaction.created_at >= credit_created,
+                    TokenTransaction.created_at <= credit_expires,
+                    or_(
+                        TokenTransaction.source == source,
+                        TokenTransaction.meta_data['deducted_from'].astext == source
+                    )
+                )
+            ).scalar() or 0
+            
+            debits += min(debits_for_this_credit, credit.amount)  # Can't deduct more than the credit amount
     else:  # purchased
         credits = db.query(func.coalesce(func.sum(TokenTransaction.amount), 0)).filter(
             and_(
@@ -423,9 +442,81 @@ def check_token_expiration(db: Session, user_id: str) -> int:
     return expired_count
 
 
+def grant_monthly_tokens_if_needed(db: Session, user_id: str) -> Optional[TokenTransaction]:
+    """
+    Check if monthly tokens need to be granted. Users can have a maximum of 10 monthly tokens.
+    Grants 10 new tokens if:
+    1. 30 days have passed since the last grant, AND
+    2. Current monthly token balance is less than 10
+    
+    Old tokens expire first (FIFO), so we only grant when balance drops below 10.
+    Each grant expires 30 days from the grant date.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+    
+    Returns:
+        TokenTransaction if tokens were granted, None otherwise
+    """
+    from datetime import timedelta
+    
+    now = datetime.now(timezone.utc)
+    
+    # Check current monthly token balance (only non-expired tokens)
+    monthly_balance = _calculate_source_balance(
+        db, user_id, 'free', 'monthly_allotment', now
+    )
+    
+    # If already at max (10), don't grant more
+    if monthly_balance >= 10:
+        return None
+    
+    # Find the most recent monthly_allotment credit transaction
+    last_grant = db.query(TokenTransaction).filter(
+        and_(
+            TokenTransaction.user_id == user_id,
+            TokenTransaction.token_type == 'free',
+            TokenTransaction.source == 'monthly_allotment',
+            TokenTransaction.amount > 0
+        )
+    ).order_by(TokenTransaction.created_at.desc()).first()
+    
+    # Check if 30 days have passed since last grant (or if no previous grant exists)
+    should_grant = False
+    if not last_grant:
+        # First time - grant tokens
+        should_grant = True
+    else:
+        # Check if 30 days have passed since last grant
+        last_grant_date = last_grant.created_at
+        if last_grant_date.tzinfo is None:
+            last_grant_date = last_grant_date.replace(tzinfo=timezone.utc)
+        
+        days_since_grant = (now - last_grant_date).days
+        if days_since_grant >= 30:
+            should_grant = True
+    
+    if should_grant:
+        # Grant 10 new monthly tokens, expiring in 30 days
+        expires_at = now + timedelta(days=30)
+        return add_tokens(
+            db=db,
+            user_id=user_id,
+            amount=10,
+            token_type='free',
+            source='monthly_allotment',
+            expires_at=expires_at,
+            metadata={'monthly_grant': True, 'grant_date': now.isoformat()}
+        )
+    
+    return None
+
+
 def has_sufficient_tokens(db: Session, user_id: str, amount: int) -> bool:
     """
     Check if user has sufficient tokens for a transaction.
+    Also checks and grants monthly tokens if needed.
     
     Args:
         db: Database session
@@ -435,6 +526,9 @@ def has_sufficient_tokens(db: Session, user_id: str, amount: int) -> bool:
     Returns:
         True if user has enough tokens, False otherwise
     """
+    # Check and grant monthly tokens if needed
+    grant_monthly_tokens_if_needed(db, user_id)
+    
     balance = calculate_token_balance(db, user_id)
     return balance.total >= amount
 

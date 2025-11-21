@@ -22,7 +22,7 @@ class TokenTransaction(Base):
     expires_at = Column(DateTime, nullable=True)  # For free tokens, NULL for purchased tokens
     stripe_payment_intent_id = Column(String, nullable=True)  # Links to Stripe payment (for future use)
     stripe_subscription_id = Column(String, nullable=True)  # For subscription-based tokens (for future use)
-    metadata = Column(JSONB, nullable=True)  # Flexible storage for additional info
+    meta_data = Column('metadata', JSONB, nullable=True)  # Flexible storage for additional info (column name is 'metadata' in DB)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     __table_args__ = (
