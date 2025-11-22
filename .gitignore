@@ -31,6 +31,16 @@ Thumbs.db
 .coverage
 htmlcov/
 test_*.py
+verify_*.py
+check_*.py
+
+# Utility/Admin Scripts (local-only, not for deployment)
+add_promotional_tokens.py
+check_user_admin.py
+check_user_tokens.py
+verify_token_calculation.py
+test_token_security.py
+test_monthly_token_reset.py
 
 # Logs
 *.log
