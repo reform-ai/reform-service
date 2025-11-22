@@ -545,10 +545,6 @@ async def update_username(
     """Update user username."""
     # Validate and sanitize username
     username = validate_username(username_data.username)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This username is reserved and cannot be used"
-        )
     
     # Check if username is already taken by another user
     existing_user = db.query(User).filter(
