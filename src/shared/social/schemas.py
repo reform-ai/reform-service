@@ -1,9 +1,10 @@
 """Pydantic schemas for social feed API."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
+from src.shared.auth.input_validation import sanitize_text
 
 
 class PostType(str, Enum):
@@ -16,10 +17,22 @@ class PostType(str, Enum):
 class PostCreate(BaseModel):
     """Schema for creating a post."""
     post_type: PostType
-    content: Optional[str] = None  # Caption or text post content
+    content: Optional[str] = Field(None, max_length=2000)  # Caption or text post content
     analysis_id: Optional[str] = None  # Link to analysis if sharing from analysis
     score_data: Optional[Dict[str, Any]] = None  # Snapshot of score details
     plot_config: Optional[Dict[str, Any]] = None  # Config to recreate plots
+    
+    @field_validator('content')
+    @classmethod
+    def validate_content(cls, v):
+        """Sanitize post content to prevent XSS."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("Content must be a string")
+        # Sanitize to prevent XSS
+        cleaned = sanitize_text(v.strip(), max_length=2000)
+        return cleaned if cleaned else None
 
 
 class PostResponse(BaseModel):
@@ -48,6 +61,18 @@ class CommentCreate(BaseModel):
     """Schema for creating a comment."""
     content: str = Field(..., min_length=1, max_length=1000)
     parent_comment_id: Optional[str] = None  # For nested replies
+    
+    @field_validator('content')
+    @classmethod
+    def validate_content(cls, v):
+        """Sanitize comment content to prevent XSS."""
+        if not v or not isinstance(v, str):
+            raise ValueError("Content cannot be empty")
+        # Sanitize to prevent XSS
+        cleaned = sanitize_text(v.strip(), max_length=1000)
+        if len(cleaned) < 1:
+            raise ValueError("Content must be at least 1 character")
+        return cleaned
 
 
 class CommentResponse(BaseModel):

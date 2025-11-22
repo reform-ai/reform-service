@@ -31,6 +31,7 @@ from src.shared.analyses.routes import router as analyses_router
 from src.shared.analyses.database import Analysis  # noqa: F401
 from fastapi.security import HTTPAuthorizationCredentials
 from typing import Optional
+from src.shared.auth.input_validation import validate_notes
 
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 5
@@ -47,21 +48,43 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     import logging
+    from sqlalchemy.exc import IntegrityError, ProgrammingError
+    
+    def safe_create_all(base, engine, name):
+        """Safely create tables, ignoring duplicate type errors."""
+        try:
+            base.metadata.create_all(bind=engine, checkfirst=True)
+        except (IntegrityError, ProgrammingError) as e:
+            error_str = str(e)
+            if "pg_type_typname_nsp_index" in error_str or "duplicate key" in error_str.lower():
+                logging.info(f"{name} tables/types already exist (safe to ignore)")
+            else:
+                logging.warning(f"{name} database error (may be safe to ignore): {error_str}")
+        except Exception as e:
+            error_str = str(e)
+            if "pg_type_typname_nsp_index" in error_str or "duplicate key" in error_str.lower():
+                logging.info(f"{name} tables/types already exist (safe to ignore)")
+            else:
+                logging.error(f"{name} database initialization error: {error_str}")
+    
     try:
         init_db()
         # Also initialize social feed tables
         from src.shared.social.database import Base as SocialBase
         from src.shared.auth.database import engine
-        SocialBase.metadata.create_all(bind=engine, checkfirst=True)
+        safe_create_all(SocialBase, engine, "Social")
         # Initialize contact rate limiting tables
         from src.shared.contact.database import Base as ContactBase
-        ContactBase.metadata.create_all(bind=engine, checkfirst=True)
+        safe_create_all(ContactBase, engine, "Contact")
         # Note: Analysis table uses the same Base as User, so it's already created by init_db()
         logging.info("Database initialization completed on startup")
     except Exception as e:
         # Log error but don't crash the app
-        # Database will be created on first use if needed
-        logging.error(f"Database initialization error on startup: {str(e)}")
+        error_str = str(e)
+        if "pg_type_typname_nsp_index" in error_str or "duplicate key" in error_str.lower():
+            logging.info("Database types already exist (safe to ignore)")
+        else:
+            logging.error(f"Database initialization error on startup: {error_str}")
         # Try to continue - database operations will handle errors gracefully
         # Tables will be created on first auth request as fallback
 
@@ -964,6 +987,10 @@ async def upload_video(
         client_ip = _get_client_ip(request)
         _check_rate_limit(client_ip)
         _validate_exercise(exercise)
+        
+        # Validate and sanitize notes if provided
+        if notes is not None:
+            notes = validate_notes(notes)
         
         # Check authentication status
         is_authenticated = credentials is not None and user_id is not None

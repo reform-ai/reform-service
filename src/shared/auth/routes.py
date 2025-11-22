@@ -7,14 +7,16 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response, Request
 from sqlalchemy.orm import Session
+from src.shared.auth.rate_limit_utils import check_rate_limit, get_client_ip
 
 from src.shared.auth.database import get_db, User, EmailVerificationToken
 from src.shared.auth.auth import (
     hash_password,
     verify_password,
     create_access_token,
+    create_refresh_token,
     generate_user_id
 )
 from src.shared.auth.schemas import (
@@ -28,10 +30,22 @@ from src.shared.auth.schemas import (
 )
 from src.shared.auth.dependencies import get_current_user
 from src.shared.auth.email_utils import send_verification_email
+from src.shared.auth.input_validation import (
+    validate_name,
+    validate_email,
+    validate_username,
+    validate_password,
+    validate_full_name,
+    validate_notes,
+    sanitize_text
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-# Email verification rate limiting (in-memory)
+# Rate limiting will be applied via decorators that access app.state.limiter
+# The limiter is initialized in app.py
+
+# Email verification rate limiting (in-memory, additional to slowapi)
 # Format: {user_id: timestamp_of_last_email}
 _verification_email_rate_limit: Dict[str, float] = {}
 RATE_LIMIT_SECONDS = 300  # 5 minutes between verification email requests
@@ -99,9 +113,18 @@ def check_rate_limit(user_id: str) -> bool:
 
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def signup(request: SignupRequest, db: Session = Depends(get_db)):
+async def signup(
+    request: Request,
+    signup_data: SignupRequest,
+    db: Session = Depends(get_db)
+):
     """Create a new user account."""
     import logging
+    
+    # Apply rate limiting (3 signups per hour per IP)
+    client_ip = get_client_ip(request)
+    check_rate_limit(client_ip, "signup", max_requests=3, window_seconds=3600)
+    
     # Ensure database tables exist (fallback if startup init failed)
     try:
         from src.shared.auth.database import Base, engine
@@ -115,39 +138,28 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
         )
     
     try:
+        # Validate and sanitize all inputs
+        email = validate_email(signup_data.email)
+        password = validate_password(signup_data.password)
+        first_name = validate_name(signup_data.first_name, "First name")
+        last_name = validate_name(signup_data.last_name, "Last name")
+        full_name = validate_full_name(first_name, last_name)
+        
         # Check if user already exists
-        existing_user = db.query(User).filter(User.email == request.email).first()
+        existing_user = db.query(User).filter(User.email == email).first()
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered"
             )
         
-        # Validate password length
-        if len(request.password) < 8:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password must be at least 8 characters"
-            )
-        
-        # Bcrypt has a 72-byte limit, warn if password is too long
-        password_bytes = request.password.encode('utf-8')
-        if len(password_bytes) > 72:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password is too long (maximum 72 bytes). Please use a shorter password."
-            )
-        
         # Create new user
         user_id = generate_user_id()
-        password_hash = hash_password(request.password)
-        
-        # Combine first_name and last_name into full_name for database storage
-        full_name = f"{request.first_name.strip()} {request.last_name.strip()}".strip()
+        password_hash = hash_password(password)
 
         new_user = User(
             id=user_id,
-            email=request.email,
+            email=email,
             password_hash=password_hash,
             full_name=full_name,
             is_verified=False,  # User must verify email to use social features
@@ -165,26 +177,66 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
         try:
             verification_token = create_verification_token(db, user_id)
             email_sent = send_verification_email(
-                user_email=request.email,
+                user_email=email,
                 user_name=full_name,
                 verification_token=verification_token
             )
             if not email_sent:
-                logging.warning(f"Failed to send verification email to {request.email} during signup")
+                logging.warning(f"Failed to send verification email to {email} during signup")
         except Exception as e:
             # Don't fail signup if email sending fails - user can request email later
             logging.error(f"Error sending verification email during signup: {str(e)}", exc_info=True)
         
-        # Create access token
-        access_token = create_access_token(data={"sub": user_id, "email": request.email})
+        # Create access and refresh tokens
+        token_data = {"sub": user_id, "email": email}
+        access_token = create_access_token(data=token_data)
+        refresh_token = create_refresh_token(data=token_data)
         
-        return TokenResponse(
-            access_token=access_token,
+        # Create response with user data (tokens sent via httpOnly cookies)
+        response = TokenResponse(
+            access_token=None,  # Not in body, sent via cookie
             token_type="bearer",
             user_id=user_id,
-            email=request.email,
+            email=email,
             full_name=full_name
         )
+        
+        # Set httpOnly cookies with tokens
+        from src.shared.auth.auth import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+        from datetime import timedelta
+        access_max_age = int(timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES).total_seconds())
+        refresh_max_age = int(timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS).total_seconds())
+        
+        # Determine if we're in production (HTTPS) or development (HTTP)
+        is_production = os.environ.get("DYNO") or os.environ.get("ENVIRONMENT") == "production"
+        
+        # Create response object
+        from fastapi.responses import JSONResponse
+        json_response = JSONResponse(content=response.dict(), status_code=status.HTTP_201_CREATED)
+        
+        # Set access token cookie (short-lived)
+        json_response.set_cookie(
+            key="access_token",
+            value=access_token,
+            max_age=access_max_age,
+            httponly=True,
+            secure=is_production,
+            samesite="lax",
+            path="/"
+        )
+        
+        # Set refresh token cookie (long-lived)
+        json_response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            max_age=refresh_max_age,
+            httponly=True,
+            secure=is_production,
+            samesite="lax",
+            path="/"
+        )
+        
+        return json_response
     except HTTPException:
         # Re-raise HTTP exceptions (validation errors, etc.)
         raise
@@ -199,13 +251,21 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest, db: Session = Depends(get_db)):
+async def login(
+    request: Request,
+    login_data: LoginRequest,
+    db: Session = Depends(get_db)
+):
     """Authenticate user and return access token."""
     import logging
     
+    # Apply rate limiting (5 login attempts per minute per IP)
+    client_ip = get_client_ip(request)
+    check_rate_limit(client_ip, "login", max_requests=5, window_seconds=60)
+    
     try:
         # Find user by email
-        user = db.query(User).filter(User.email == request.email).first()
+        user = db.query(User).filter(User.email == login_data.email).first()
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -213,7 +273,7 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
             )
         
         # Verify password
-        if not verify_password(request.password, user.password_hash):
+        if not verify_password(login_data.password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password"
@@ -227,24 +287,64 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
             pass
         db.commit()
         
-        # Create access token
+        # Create access and refresh tokens
         try:
-            access_token = create_access_token(data={"sub": user.id, "email": user.email})
+            token_data = {"sub": user.id, "email": user.email}
+            access_token = create_access_token(data=token_data)
+            refresh_token = create_refresh_token(data=token_data)
         except ValueError as e:
             # SECRET_KEY is missing or invalid
-            logging.error(f"Failed to create access token: {str(e)}")
+            logging.error(f"Failed to create tokens: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Server configuration error. Please contact support."
             )
         
-        return TokenResponse(
-            access_token=access_token,
+        # Create response with user data (tokens sent via httpOnly cookies)
+        response = TokenResponse(
+            access_token=None,  # Not in body, sent via cookie
             token_type="bearer",
             user_id=user.id,
             email=user.email,
             full_name=user.full_name
         )
+        
+        # Set httpOnly cookies with tokens
+        from src.shared.auth.auth import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+        from datetime import timedelta
+        access_max_age = int(timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES).total_seconds())
+        refresh_max_age = int(timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS).total_seconds())
+        
+        # Determine if we're in production (HTTPS) or development (HTTP)
+        is_production = os.environ.get("DYNO") or os.environ.get("ENVIRONMENT") == "production"
+        
+        # Create response object
+        from fastapi.responses import JSONResponse
+        json_response = JSONResponse(content=response.dict())
+        
+        # Set access token cookie (short-lived)
+        json_response.set_cookie(
+            key="access_token",
+            value=access_token,
+            max_age=access_max_age,
+            httponly=True,
+            secure=is_production,
+            samesite="lax",
+            path="/"
+        )
+        
+        # Set refresh token cookie (long-lived)
+        json_response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            max_age=refresh_max_age,
+            httponly=True,
+            secure=is_production,
+            samesite="lax",
+            path="/"
+        )
+        
+        return json_response
     except HTTPException:
         # Re-raise HTTP exceptions (authentication failures, etc.)
         raise
@@ -256,6 +356,116 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Login failed. Please try again later."
         )
+
+
+@router.post("/refresh", status_code=status.HTTP_200_OK)
+async def refresh_token_endpoint(request: Request, db: Session = Depends(get_db)):
+    """
+    Refresh access token using refresh token.
+    Returns new access token in httpOnly cookie.
+    """
+    # Apply rate limiting (10 refresh requests per minute per IP)
+    client_ip = get_client_ip(request)
+    check_rate_limit(client_ip, "refresh", max_requests=10, window_seconds=60)
+    
+    # Get refresh token from cookie
+    refresh_token = request.cookies.get("refresh_token")
+    
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token not found"
+        )
+    
+    # Verify refresh token
+    from src.shared.auth.auth import verify_token, create_access_token
+    payload = verify_token(refresh_token, token_type="refresh")
+    
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token"
+        )
+    
+    # Get user ID from token
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload"
+        )
+    
+    # Verify user exists
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+    
+    # Create new access token
+    try:
+        access_token = create_access_token(data={"sub": user.id, "email": user.email})
+    except ValueError as e:
+        logging.error(f"Failed to create access token: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server configuration error. Please contact support."
+        )
+    
+    # Set new access token cookie
+    from src.shared.auth.auth import ACCESS_TOKEN_EXPIRE_MINUTES
+    from datetime import timedelta
+    access_max_age = int(timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES).total_seconds())
+    is_production = os.environ.get("DYNO") or os.environ.get("ENVIRONMENT") == "production"
+    
+    from fastapi.responses import JSONResponse
+    response = JSONResponse(content={"message": "Token refreshed successfully"})
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        max_age=access_max_age,
+        httponly=True,
+        secure=is_production,
+        samesite="lax",
+        path="/"
+    )
+    
+    return response
+
+
+@router.post("/logout", status_code=status.HTTP_200_OK)
+async def logout():
+    """
+    Logout endpoint that clears the httpOnly cookies.
+    No authentication required - just clears the cookies.
+    """
+    from fastapi.responses import JSONResponse
+    response = JSONResponse(content={"message": "Logged out successfully"})
+    
+    # Determine if we're in production (HTTPS) or development (HTTP)
+    is_production = os.environ.get("DYNO") or os.environ.get("ENVIRONMENT") == "production"
+    
+    # Clear both cookies by setting them with max_age=0
+    response.set_cookie(
+        key="access_token",
+        value="",
+        max_age=0,
+        httponly=True,
+        secure=is_production,
+        samesite="lax",
+        path="/"
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value="",
+        max_age=0,
+        httponly=True,
+        secure=is_production,
+        samesite="lax",
+        path="/"
+    )
+    return response
 
 
 @router.get("/me", response_model=UserResponse)
@@ -292,42 +502,34 @@ async def get_current_user_info(
 
 @router.post("/change-password", status_code=status.HTTP_200_OK)
 async def change_password(
-    request: ChangePasswordRequest,
+    request: Request,
+    password_data: ChangePasswordRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Change user password."""
+    # Apply rate limiting (5 password changes per hour per user)
+    check_rate_limit(current_user.id, "change_password", max_requests=5, window_seconds=3600)
+    
     # Verify current password
-    if not verify_password(request.current_password, current_user.password_hash):
+    if not verify_password(password_data.current_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current password is incorrect"
         )
     
-    # Validate new password length
-    if len(request.new_password) < 8:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be at least 8 characters"
-        )
+    # Validate new password
+    new_password = validate_password(password_data.new_password)
     
     # Check new password is different
-    if verify_password(request.new_password, current_user.password_hash):
+    if verify_password(new_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="New password must be different from current password"
         )
     
-    # Bcrypt has a 72-byte limit
-    password_bytes = request.new_password.encode('utf-8')
-    if len(password_bytes) > 72:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password is too long (maximum 72 bytes)"
-        )
-    
     # Hash and update password
-    new_password_hash = hash_password(request.new_password)
+    new_password_hash = hash_password(new_password)
     current_user.password_hash = new_password_hash
     db.commit()
     
@@ -336,48 +538,13 @@ async def change_password(
 
 @router.post("/update-username", status_code=status.HTTP_200_OK)
 async def update_username(
-    request: UpdateUsernameRequest,
+    username_data: UpdateUsernameRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Update user username."""
-    import re
-    
-    # Reserved usernames that cannot be used
-    RESERVED_USERNAMES = {
-        'admin', 'administrator', 'adm', 'ad',
-        'dev', 'developer', 'devops',
-        'test', 'testing', 'tester',
-        'root', 'system', 'service',
-        'api', 'app', 'web',
-        'support', 'help', 'info',
-        'null', 'undefined', 'none'
-    }
-    
-    username = request.username.strip().lower()
-    
-    # Validation: username must be 3-30 characters, alphanumeric and underscores only
-    if len(username) < 3:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username must be at least 3 characters"
-        )
-    
-    if len(username) > 30:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username must be at most 30 characters"
-        )
-    
-    # Check if username contains only alphanumeric characters and underscores
-    if not re.match(r'^[a-z0-9_]+$', username):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username can only contain lowercase letters, numbers, and underscores"
-        )
-    
-    # Check if username is reserved
-    if username in RESERVED_USERNAMES:
+    # Validate and sanitize username
+    username = validate_username(username_data.username)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This username is reserved and cannot be used"
@@ -429,9 +596,14 @@ async def update_profile(
             )
         current_user.community_preference = request.community_preference
     
-    # Update favorite_exercise if provided (no validation yet, will add dropdown later)
+    # Update favorite_exercise if provided - validate and sanitize
     if request.favorite_exercise is not None:
-        current_user.favorite_exercise = request.favorite_exercise.strip() if request.favorite_exercise else None
+        if request.favorite_exercise.strip():
+            # Sanitize to prevent XSS
+            favorite_exercise = sanitize_text(request.favorite_exercise.strip(), max_length=100)
+            current_user.favorite_exercise = favorite_exercise
+        else:
+            current_user.favorite_exercise = None
     
     db.commit()
     

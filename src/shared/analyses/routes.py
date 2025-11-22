@@ -287,8 +287,9 @@ async def update_analysis_notes(
             detail="Analysis not found"
         )
     
-    # Update notes
-    analysis.notes = request.notes
+    # Validate and sanitize notes
+    from src.shared.auth.input_validation import validate_notes
+    analysis.notes = validate_notes(request.notes)
     db.commit()
     db.refresh(analysis)
     
