@@ -9,7 +9,7 @@ from typing import List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Response, Request
 from sqlalchemy.orm import Session
-from src.shared.auth.rate_limit_utils import check_rate_limit, get_client_ip
+from src.shared.auth.rate_limit_utils import check_rate_limit as check_general_rate_limit, get_client_ip
 
 from src.shared.auth.database import get_db, User, EmailVerificationToken
 from src.shared.auth.auth import (
@@ -123,7 +123,7 @@ async def signup(
     
     # Apply rate limiting (3 signups per hour per IP)
     client_ip = get_client_ip(request)
-    check_rate_limit(client_ip, "signup", max_requests=3, window_seconds=3600)
+    check_general_rate_limit(client_ip, "signup", max_requests=3, window_seconds=3600)
     
     # Ensure database tables exist (fallback if startup init failed)
     try:
@@ -261,7 +261,7 @@ async def login(
     
     # Apply rate limiting (5 login attempts per minute per IP)
     client_ip = get_client_ip(request)
-    check_rate_limit(client_ip, "login", max_requests=5, window_seconds=60)
+    check_general_rate_limit(client_ip, "login", max_requests=5, window_seconds=60)
     
     try:
         # Find user by email
@@ -366,7 +366,7 @@ async def refresh_token_endpoint(request: Request, db: Session = Depends(get_db)
     """
     # Apply rate limiting (10 refresh requests per minute per IP)
     client_ip = get_client_ip(request)
-    check_rate_limit(client_ip, "refresh", max_requests=10, window_seconds=60)
+    check_general_rate_limit(client_ip, "refresh", max_requests=10, window_seconds=60)
     
     # Get refresh token from cookie
     refresh_token = request.cookies.get("refresh_token")
@@ -509,7 +509,7 @@ async def change_password(
 ):
     """Change user password."""
     # Apply rate limiting (5 password changes per hour per user)
-    check_rate_limit(current_user.id, "change_password", max_requests=5, window_seconds=3600)
+    check_general_rate_limit(current_user.id, "change_password", max_requests=5, window_seconds=3600)
     
     # Verify current password
     if not verify_password(password_data.current_password, current_user.password_hash):
