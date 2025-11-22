@@ -215,13 +215,15 @@ async def signup(
         json_response = JSONResponse(content=response.dict(), status_code=status.HTTP_201_CREATED)
         
         # Set access token cookie (short-lived)
+        # Use samesite="none" for cross-origin requests (client and API on different domains)
+        # secure=True is required when samesite="none"
         json_response.set_cookie(
             key="access_token",
             value=access_token,
             max_age=access_max_age,
             httponly=True,
-            secure=is_production,
-            samesite="lax",
+            secure=True,  # Required for samesite="none"
+            samesite="none",  # Allow cross-origin cookie sending
             path="/"
         )
         
@@ -231,8 +233,8 @@ async def signup(
             value=refresh_token,
             max_age=refresh_max_age,
             httponly=True,
-            secure=is_production,
-            samesite="lax",
+            secure=True,  # Required for samesite="none"
+            samesite="none",  # Allow cross-origin cookie sending
             path="/"
         )
         
@@ -323,13 +325,15 @@ async def login(
         json_response = JSONResponse(content=response.dict())
         
         # Set access token cookie (short-lived)
+        # Use samesite="none" for cross-origin requests (client and API on different domains)
+        # secure=True is required when samesite="none"
         json_response.set_cookie(
             key="access_token",
             value=access_token,
             max_age=access_max_age,
             httponly=True,
-            secure=is_production,
-            samesite="lax",
+            secure=True,  # Required for samesite="none"
+            samesite="none",  # Allow cross-origin cookie sending
             path="/"
         )
         
@@ -339,8 +343,8 @@ async def login(
             value=refresh_token,
             max_age=refresh_max_age,
             httponly=True,
-            secure=is_production,
-            samesite="lax",
+            secure=True,  # Required for samesite="none"
+            samesite="none",  # Allow cross-origin cookie sending
             path="/"
         )
         
@@ -426,8 +430,8 @@ async def refresh_token_endpoint(request: Request, db: Session = Depends(get_db)
         value=access_token,
         max_age=access_max_age,
         httponly=True,
-        secure=is_production,
-        samesite="lax",
+        secure=True,  # Required for samesite="none"
+        samesite="none",  # Allow cross-origin cookie sending
         path="/"
     )
     
@@ -447,13 +451,14 @@ async def logout():
     is_production = os.environ.get("DYNO") or os.environ.get("ENVIRONMENT") == "production"
     
     # Clear both cookies by setting them with max_age=0
+    # Use same settings as when setting cookies (samesite="none", secure=True)
     response.set_cookie(
         key="access_token",
         value="",
         max_age=0,
         httponly=True,
-        secure=is_production,
-        samesite="lax",
+        secure=True,
+        samesite="none",
         path="/"
     )
     response.set_cookie(
@@ -461,8 +466,8 @@ async def logout():
         value="",
         max_age=0,
         httponly=True,
-        secure=is_production,
-        samesite="lax",
+        secure=True,
+        samesite="none",
         path="/"
     )
     return response
