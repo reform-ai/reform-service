@@ -273,11 +273,24 @@ async def activate_tokens(
     Activate token system for user (one-time, lifetime).
     Grants 10 free monthly tokens and sets token_activation_date.
     Can only be called once per user.
+    
+    Uses a fresh database query to prevent race conditions and ensure
+    the activation check is atomic.
     """
     from datetime import datetime, timezone
     
-    # Check if already activated
-    if current_user.token_activation_date is not None:
+    # Query user fresh from database to ensure we have the latest state
+    # This prevents issues with stale session objects
+    user = db.query(User).filter(User.id == current_user.id).with_for_update().first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Check if already activated (using fresh query, not session object)
+    if user.token_activation_date is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Token system already activated. This can only be done once."
@@ -285,13 +298,13 @@ async def activate_tokens(
     
     # Set activation date
     now = datetime.now(timezone.utc)
-    current_user.token_activation_date = now
+    user.token_activation_date = now
     
     # Grant 10 monthly tokens (expires in 30 days)
     expires_at = now + timedelta(days=30)
     add_tokens(
         db=db,
-        user_id=current_user.id,
+        user_id=user.id,
         amount=10,
         token_type='free',
         source='monthly_allotment',
