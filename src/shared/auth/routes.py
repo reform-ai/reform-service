@@ -1,12 +1,15 @@
-"""Authentication routes: signup and login endpoints."""
+"""Authentication routes: signup, login, and email verification endpoints."""
 
+import os
 import secrets
 import logging
 import time
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict
+
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.orm import Session
+
 from src.shared.auth.database import get_db, User, EmailVerificationToken
 from src.shared.auth.auth import (
     hash_password,
@@ -28,10 +31,10 @@ from src.shared.auth.email_utils import send_verification_email
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-# In-memory rate limiting for verification emails
+# Email verification rate limiting (in-memory)
 # Format: {user_id: timestamp_of_last_email}
 _verification_email_rate_limit: Dict[str, float] = {}
-RATE_LIMIT_SECONDS = 300  # 5 minutes
+RATE_LIMIT_SECONDS = 300  # 5 minutes between verification email requests
 
 
 def generate_verification_token() -> str:
@@ -42,10 +45,14 @@ def generate_verification_token() -> str:
 def create_verification_token(db: Session, user_id: str) -> str:
     """
     Create a new verification token for a user, invalidating old unused tokens.
-    Returns the token string.
-    """
-    import os
     
+    Args:
+        db: Database session
+        user_id: User ID to create token for
+    
+    Returns:
+        The verification token string
+    """
     # Invalidate all existing unused tokens for this user
     db.query(EmailVerificationToken).filter(
         EmailVerificationToken.user_id == user_id,
@@ -56,8 +63,10 @@ def create_verification_token(db: Session, user_id: str) -> str:
     token = generate_verification_token()
     
     # Calculate expiration (default 1 hour, configurable)
+    # Use timezone-naive UTC datetime (datetime.utcnow()) to match database storage
+    # This ensures consistent timezone handling regardless of database timezone setting
     expiry_hours = int(os.environ.get("VERIFICATION_TOKEN_EXPIRY_HOURS", "1"))
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=expiry_hours)
+    expires_at = datetime.utcnow() + timedelta(hours=expiry_hours)
     
     # Create new token record
     verification_token = EmailVerificationToken(
@@ -141,7 +150,7 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
             email=request.email,
             password_hash=password_hash,
             full_name=full_name,
-            is_verified=False,  # Email verification to be implemented later
+            is_verified=False,  # User must verify email to use social features
             created_at=datetime.utcnow(),
             tokens_remaining=10,  # Keep for backward compatibility, but use transaction system
             last_token_reset=datetime.utcnow()
@@ -150,9 +159,9 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
         db.add(new_user)
         db.commit()
         # Note: Tokens are NOT granted at signup. User must click "Get 10 Free Tokens" button on profile page.
-        # No need to refresh - we have all the values we need
         
         # Send verification email automatically after signup
+        # Don't fail signup if email sending fails - user can request email later
         try:
             verification_token = create_verification_token(db, user_id)
             email_sent = send_verification_email(
@@ -521,12 +530,9 @@ async def verify_email(
             )
         
         # Check if token has expired
-        now = datetime.now(timezone.utc)
-        if verification_token.expires_at.tzinfo is None:
-            # Make timezone-aware if it's not
-            expires_at = verification_token.expires_at.replace(tzinfo=timezone.utc)
-        else:
-            expires_at = verification_token.expires_at
+        # Both expires_at and now are timezone-naive UTC times
+        now = datetime.utcnow()
+        expires_at = verification_token.expires_at
         
         if now > expires_at:
             raise HTTPException(
@@ -545,13 +551,13 @@ async def verify_email(
         # Check if already verified
         if user.is_verified:
             # Mark token as used even if already verified (idempotent)
-            verification_token.used_at = now
+            verification_token.used_at = datetime.utcnow()
             db.commit()
             return {"message": "Email is already verified"}
         
         # Verify user and mark token as used
         user.is_verified = True
-        verification_token.used_at = now
+        verification_token.used_at = datetime.utcnow()
         db.commit()
         
         return {"message": "Email verified successfully"}

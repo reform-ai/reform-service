@@ -5,7 +5,6 @@ import smtplib
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional
 
 
 def send_verification_email(user_email: str, user_name: str, verification_token: str) -> bool:
