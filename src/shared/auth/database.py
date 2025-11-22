@@ -1,9 +1,10 @@
 """Database setup and configuration."""
 
-from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Integer
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Integer, ForeignKey, Index
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, date
 import os
+import uuid
 
 # Load environment variables from .env file (for local development)
 try:
@@ -65,6 +66,24 @@ class User(Base):
     stripe_customer_id = Column(String, unique=True, nullable=True)  # Stripe customer ID (for future use)
     subscription_status = Column(String, nullable=True)  # 'none', 'active', 'canceled', 'past_due' (for future use)
     subscription_tier = Column(String, nullable=True)  # e.g., 'basic', 'pro' (for future use)
+
+
+class EmailVerificationToken(Base):
+    """Email verification token model for account verification."""
+    __tablename__ = "email_verification_tokens"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token = Column(String, unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    used_at = Column(DateTime, nullable=True)  # Set when token is used for verification
+
+    __table_args__ = (
+        Index('idx_email_verification_tokens_user_id', 'user_id'),
+        Index('idx_email_verification_tokens_token', 'token'),
+        Index('idx_email_verification_tokens_expires_at', 'expires_at'),
+    )
 
 
 class AnonymousAnalysis(Base):

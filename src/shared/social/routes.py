@@ -8,7 +8,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 from src.shared.auth.database import get_db, User
-from src.shared.auth.dependencies import get_current_user, require_username
+from src.shared.auth.dependencies import get_current_user, require_username_and_verified
 from src.shared.social.database import Post, Like, Comment, Follow
 from src.shared.social.schemas import (
     PostCreate,
@@ -182,7 +182,7 @@ async def get_feed(
 @router.post("/posts", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
 async def create_post(
     post_data: PostCreate,
-    current_user: User = Depends(require_username),
+    current_user: User = Depends(require_username_and_verified),
     db: Session = Depends(get_db)
 ):
     """Create a new post."""
@@ -297,7 +297,7 @@ async def delete_post(
 @router.post("/posts/{post_id}/like", response_model=dict)
 async def toggle_like(
     post_id: str,
-    current_user: User = Depends(require_username),
+    current_user: User = Depends(require_username_and_verified),
     db: Session = Depends(get_db)
 ):
     """Toggle like on a post."""
@@ -432,7 +432,7 @@ async def get_comments(
 async def create_comment(
     post_id: str,
     comment_data: CommentCreate,
-    current_user: User = Depends(require_username),
+    current_user: User = Depends(require_username_and_verified),
     db: Session = Depends(get_db)
 ):
     """Create a comment on a post."""
@@ -545,7 +545,7 @@ async def get_follow_status(
 @router.post("/users/{username}/follow", response_model=dict)
 async def toggle_follow(
     username: str,
-    current_user: User = Depends(require_username),
+    current_user: User = Depends(require_username_and_verified),
     db: Session = Depends(get_db)
 ):
     """Follow or unfollow a user."""

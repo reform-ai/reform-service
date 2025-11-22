@@ -1,10 +1,13 @@
 """Authentication routes: signup and login endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import secrets
+import logging
+import time
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from datetime import datetime
-from typing import List
-from src.shared.auth.database import get_db, User
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict
+from src.shared.auth.database import get_db, User, EmailVerificationToken
 from src.shared.auth.auth import (
     hash_password,
     verify_password,
@@ -21,8 +24,69 @@ from src.shared.auth.schemas import (
     UpdateProfileRequest
 )
 from src.shared.auth.dependencies import get_current_user
+from src.shared.auth.email_utils import send_verification_email
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# In-memory rate limiting for verification emails
+# Format: {user_id: timestamp_of_last_email}
+_verification_email_rate_limit: Dict[str, float] = {}
+RATE_LIMIT_SECONDS = 300  # 5 minutes
+
+
+def generate_verification_token() -> str:
+    """Generate a secure random token for email verification."""
+    return secrets.token_urlsafe(32)
+
+
+def create_verification_token(db: Session, user_id: str) -> str:
+    """
+    Create a new verification token for a user, invalidating old unused tokens.
+    Returns the token string.
+    """
+    import os
+    
+    # Invalidate all existing unused tokens for this user
+    db.query(EmailVerificationToken).filter(
+        EmailVerificationToken.user_id == user_id,
+        EmailVerificationToken.used_at.is_(None)
+    ).delete()
+    
+    # Generate new token
+    token = generate_verification_token()
+    
+    # Calculate expiration (default 1 hour, configurable)
+    expiry_hours = int(os.environ.get("VERIFICATION_TOKEN_EXPIRY_HOURS", "1"))
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=expiry_hours)
+    
+    # Create new token record
+    verification_token = EmailVerificationToken(
+        user_id=user_id,
+        token=token,
+        expires_at=expires_at
+    )
+    
+    db.add(verification_token)
+    db.commit()
+    
+    return token
+
+
+def check_rate_limit(user_id: str) -> bool:
+    """
+    Check if user can send verification email (rate limiting).
+    Returns True if allowed, False if rate limited.
+    """
+    current_time = time.time()
+    
+    if user_id in _verification_email_rate_limit:
+        last_sent = _verification_email_rate_limit[user_id]
+        if current_time - last_sent < RATE_LIMIT_SECONDS:
+            return False
+    
+    # Update rate limit
+    _verification_email_rate_limit[user_id] = current_time
+    return True
 
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -87,6 +151,20 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
         db.commit()
         # Note: Tokens are NOT granted at signup. User must click "Get 10 Free Tokens" button on profile page.
         # No need to refresh - we have all the values we need
+        
+        # Send verification email automatically after signup
+        try:
+            verification_token = create_verification_token(db, user_id)
+            email_sent = send_verification_email(
+                user_email=request.email,
+                user_name=full_name,
+                verification_token=verification_token
+            )
+            if not email_sent:
+                logging.warning(f"Failed to send verification email to {request.email} during signup")
+        except Exception as e:
+            # Don't fail signup if email sending fails - user can request email later
+            logging.error(f"Error sending verification email during signup: {str(e)}", exc_info=True)
         
         # Create access token
         access_token = create_access_token(data={"sub": user_id, "email": request.email})
@@ -354,6 +432,149 @@ async def update_profile(
         "favorite_exercise": current_user.favorite_exercise,
         "community_preference": current_user.community_preference
     }
+
+
+@router.post("/send-verification-email", status_code=status.HTTP_200_OK)
+async def send_verification_email_endpoint(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Send verification email to the current user.
+    Rate limited to 1 email per 5 minutes per user.
+    """
+    # Check if already verified
+    if current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is already verified"
+        )
+    
+    # Check rate limit
+    if not check_rate_limit(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Please wait before requesting another verification email. You can request a new email in {RATE_LIMIT_SECONDS // 60} minutes."
+        )
+    
+    try:
+        # Create new verification token
+        verification_token = create_verification_token(db, current_user.id)
+        
+        # Send email
+        email_sent = send_verification_email(
+            user_email=current_user.email,
+            user_name=current_user.full_name,
+            verification_token=verification_token
+        )
+        
+        if not email_sent:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to send verification email. Please try again later."
+            )
+        
+        return {"message": "Verification email sent successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error sending verification email: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send verification email. Please try again later."
+        )
+
+
+@router.get("/verify-email", status_code=status.HTTP_200_OK)
+async def verify_email(
+    token: str = Query(..., description="Verification token from email"),
+    db: Session = Depends(get_db)
+):
+    """
+    Verify user email using token from verification email.
+    Public endpoint (no authentication required).
+    """
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification token is required"
+        )
+    
+    try:
+        # Find token in database
+        verification_token = db.query(EmailVerificationToken).filter(
+            EmailVerificationToken.token == token
+        ).first()
+        
+        if not verification_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid verification token"
+            )
+        
+        # Check if token has been used
+        if verification_token.used_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This verification token has already been used"
+            )
+        
+        # Check if token has expired
+        now = datetime.now(timezone.utc)
+        if verification_token.expires_at.tzinfo is None:
+            # Make timezone-aware if it's not
+            expires_at = verification_token.expires_at.replace(tzinfo=timezone.utc)
+        else:
+            expires_at = verification_token.expires_at
+        
+        if now > expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification token has expired. Please request a new verification email."
+            )
+        
+        # Get user
+        user = db.query(User).filter(User.id == verification_token.user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Check if already verified
+        if user.is_verified:
+            # Mark token as used even if already verified (idempotent)
+            verification_token.used_at = now
+            db.commit()
+            return {"message": "Email is already verified"}
+        
+        # Verify user and mark token as used
+        user.is_verified = True
+        verification_token.used_at = now
+        db.commit()
+        
+        return {"message": "Email verified successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error verifying email: {str(e)}", exc_info=True)
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify email. Please try again later."
+        )
+
+
+@router.get("/verification-status", status_code=status.HTTP_200_OK)
+async def get_verification_status(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the email verification status of the current user.
+    """
+    return {"is_verified": current_user.is_verified}
 
 
 @router.get("/admin/users", response_model=List[UserResponse])

@@ -69,3 +69,30 @@ def require_username(
         )
     return current_user
 
+
+def require_username_and_verified(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """
+    Dependency that ensures the current user has both a username set and verified email.
+    Required for social features (posts, likes, comments, follows).
+    
+    Raises HTTPException if username is not set or email is not verified.
+    Returns the user if both conditions are met.
+    """
+    # Check username first
+    if not current_user.username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username is required for this action. Please set a username in your profile."
+        )
+    
+    # Check verification status
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please verify your email address to use social features. Check your email for a verification link."
+        )
+    
+    return current_user
+
