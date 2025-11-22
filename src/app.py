@@ -25,6 +25,7 @@ from src.shared.auth.dependencies import security
 from src.shared.social.routes import router as social_router
 from src.shared.payment.routes import router as payment_router
 from src.shared.contact.routes import router as contact_router
+from src.shared.admin.routes import router as admin_router
 from fastapi.security import HTTPAuthorizationCredentials
 
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -70,6 +71,9 @@ app.include_router(payment_router)
 
 # Include contact routes
 app.include_router(contact_router)
+
+# Include admin routes
+app.include_router(admin_router)
 
 # Use /tmp/outputs on Heroku (ephemeral filesystem), otherwise use local outputs directory
 if os.environ.get("DYNO"):  # Heroku sets DYNO environment variable
@@ -850,11 +854,11 @@ async def upload_video(
         
         # For logged-in users: check if they have at least 1 token BEFORE upload (base cost is always 1)
         if is_authenticated:
-            # Fetch user to check token count using new transaction system
             from src.shared.auth.database import User
             from src.shared.payment.token_utils import calculate_token_balance, has_sufficient_tokens
             db = next(get_db())
             try:
+                # Fetch user to verify they exist
                 user = db.query(User).filter(User.id == user_id).first()
                 if not user:
                     db.close()
@@ -862,24 +866,50 @@ async def upload_video(
                         status_code=401,
                         detail="User not found"
                     )
-                # Check token balance using transaction system
+                
+                # Check if user has sufficient tokens for analysis (requires at least 1 token)
                 if not has_sufficient_tokens(db, user_id, 1):
                     balance = calculate_token_balance(db, user_id)
+                    
+                    # Determine if user needs to activate their token system
+                    # Users who haven't activated won't have token_activation_date set
+                    needs_activation = user.token_activation_date is None
                     db.close()
-                    raise HTTPException(
-                        status_code=402,
-                        detail={
-                            "error": "insufficient_tokens",
-                            "message": f"Insufficient tokens. You need at least 1 token but only have {balance.total} remaining.",
-                            "tokens_required": 1,
-                            "tokens_remaining": balance.total,
-                            "free_tokens": balance.free_tokens,
-                            "purchased_tokens": balance.purchased_tokens
-                        }
-                    )
+                    
+                    # Return different error messages based on activation status
+                    # This allows the frontend to show appropriate UI (activation button vs. purchase prompt)
+                    if needs_activation:
+                        raise HTTPException(
+                            status_code=402,
+                            detail={
+                                "error": "insufficient_tokens",
+                                "message": "You need to activate your token system to start analyzing videos. Get 10 free tokens to begin!",
+                                "needs_activation": True,  # Frontend uses this to show activation button
+                                "tokens_required": 1,
+                                "tokens_remaining": 0,
+                                "free_tokens": 0,
+                                "purchased_tokens": 0
+                            }
+                        )
+                    else:
+                        # User has activated but doesn't have enough tokens
+                        raise HTTPException(
+                            status_code=402,
+                            detail={
+                                "error": "insufficient_tokens",
+                                "message": f"Insufficient tokens. You need at least 1 token but only have {balance.total} remaining.",
+                                "needs_activation": False,
+                                "tokens_required": 1,
+                                "tokens_remaining": balance.total,
+                                "free_tokens": balance.free_tokens,
+                                "purchased_tokens": balance.purchased_tokens
+                            }
+                        )
             except HTTPException:
+                # Re-raise HTTP exceptions (they're intentional)
                 raise
             except Exception as e:
+                # Log unexpected errors but don't crash the upload
                 import logging
                 logging.warning(f"Failed to check user tokens: {str(e)}")
                 db.rollback()

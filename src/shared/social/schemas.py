@@ -27,7 +27,7 @@ class PostResponse(BaseModel):
     id: str
     user_id: str
     username: Optional[str] = None  # Will be populated from user
-    user_email: Optional[str] = None  # User's email for badge display
+    is_pt: bool = False  # Whether the post author is a verified Personal Trainer
     post_type: str
     content: Optional[str] = None
     analysis_id: Optional[str] = None
@@ -56,7 +56,7 @@ class CommentResponse(BaseModel):
     post_id: str
     user_id: str
     username: Optional[str] = None  # Will be populated from user
-    user_email: Optional[str] = None  # User's email for badge display
+    is_pt: bool = False  # Whether the comment author is a verified Personal Trainer
     content: str
     parent_comment_id: Optional[str] = None
     created_at: datetime
@@ -125,4 +125,22 @@ class FollowersResponse(BaseModel):
     """Schema for followers list response."""
     followers: List[FollowerInfo]
     total: int
+
+
+class PublicUserProfileResponse(BaseModel):
+    """Schema for public user profile response.
+    
+    Privacy rules:
+    - full_name and email are NEVER exposed to other users
+    - username and preferences (technical_level, favorite_exercise, community_preference) are always visible
+    - posts are only visible if user is public OR if viewer follows the user
+    """
+    username: Optional[str] = None
+    is_pt: bool = False  # Whether the user is a verified Personal Trainer
+    technical_level: Optional[str] = None  # answer1
+    favorite_exercise: Optional[str] = None  # answer2
+    community_preference: Optional[str] = None  # answer3
+    is_public: bool
+    posts: Optional[List[PostResponse]] = None  # Only included if visible (public or followed)
+    can_see_posts: bool  # Whether the viewer can see posts
 

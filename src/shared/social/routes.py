@@ -8,7 +8,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 from src.shared.auth.database import get_db, User
-from src.shared.auth.dependencies import get_current_user
+from src.shared.auth.dependencies import get_current_user, require_username
 from src.shared.social.database import Post, Like, Comment, Follow
 from src.shared.social.schemas import (
     PostCreate,
@@ -21,7 +21,8 @@ from src.shared.social.schemas import (
     PrivacyResponse,
     FeedResponse,
     FollowerInfo,
-    FollowersResponse
+    FollowersResponse,
+    PublicUserProfileResponse
 )
 
 router = APIRouter(prefix="/api/social", tags=["social"])
@@ -139,7 +140,7 @@ async def get_feed(
     user_ids = list(set(post.user_id for post in posts))
     users = db.query(User).filter(User.id.in_(user_ids)).all()
     username_map = {user.id: user.username for user in users}
-    email_map = {user.id: user.email for user in users}
+    is_pt_map = {user.id: user.is_pt for user in users}  # Map user IDs to is_pt status
     
     # Build response
     post_responses = []
@@ -148,7 +149,7 @@ async def get_feed(
             id=str(post.id),
             user_id=post.user_id,
             username=username_map.get(post.user_id),
-            user_email=email_map.get(post.user_id),
+            is_pt=is_pt_map.get(post.user_id, False),  # Use database field instead of email
             post_type=post.post_type,
             content=post.content,
             analysis_id=post.analysis_id,
@@ -173,16 +174,10 @@ async def get_feed(
 @router.post("/posts", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
 async def create_post(
     post_data: PostCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_username),
     db: Session = Depends(get_db)
 ):
     """Create a new post."""
-    # Check if user has username set
-    if not current_user.username:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username is required to create posts. Please set a username in your profile."
-        )
     
     # Create post
     post = Post(
@@ -205,7 +200,7 @@ async def create_post(
         id=str(post.id),
         user_id=post.user_id,
         username=current_user.username,
-        user_email=current_user.email,
+        is_pt=current_user.is_pt,  # Use database field instead of email
         post_type=post.post_type,
         content=post.content,
         analysis_id=post.analysis_id,
@@ -252,7 +247,7 @@ async def get_post(
         id=str(post.id),
         user_id=post.user_id,
         username=post_owner.username,
-        user_email=post_owner.email,
+        is_pt=post_owner.is_pt,  # Use database field instead of email
         post_type=post.post_type,
         content=post.content,
         analysis_id=post.analysis_id,
@@ -294,16 +289,10 @@ async def delete_post(
 @router.post("/posts/{post_id}/like", response_model=dict)
 async def toggle_like(
     post_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_username),
     db: Session = Depends(get_db)
 ):
     """Toggle like on a post."""
-    # Check if user has username set
-    if not current_user.username:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username is required to like posts. Please set a username in your profile."
-        )
     
     # Check if post exists and user can see it
     post = db.query(Post).filter(Post.id == post_id).first()
@@ -373,11 +362,11 @@ async def get_comments(
         Comment.post_id == post_id
     ).order_by(Comment.created_at.desc()).all()
     
-    # Get usernames and emails for all commenters
+    # Get usernames and is_pt status for all commenters
     user_ids = list(set(comment.user_id for comment in all_comments))
     users = db.query(User).filter(User.id.in_(user_ids)).all()
     username_map = {user.id: user.username for user in users}
-    email_map = {user.id: user.email for user in users}
+    is_pt_map = {user.id: user.is_pt for user in users}  # Map user IDs to is_pt status
     
     # Separate top-level comments and replies
     top_level_comments = [c for c in all_comments if c.parent_comment_id is None]
@@ -404,7 +393,7 @@ async def get_comments(
             post_id=str(comment.post_id),
             user_id=comment.user_id,
             username=username_map.get(comment.user_id),
-            user_email=email_map.get(comment.user_id),
+            is_pt=is_pt_map.get(comment.user_id, False),  # Use database field instead of email
             content=display_content,
             parent_comment_id=None,
             created_at=comment.created_at,
@@ -420,7 +409,7 @@ async def get_comments(
                 post_id=str(reply.post_id),
                 user_id=reply.user_id,
                 username=username_map.get(reply.user_id),
-                user_email=email_map.get(reply.user_id),
+                is_pt=is_pt_map.get(reply.user_id, False),  # Use database field instead of email
                 content=reply_display_content,
                 parent_comment_id=str(reply.parent_comment_id),
                 created_at=reply.created_at,
@@ -435,16 +424,10 @@ async def get_comments(
 async def create_comment(
     post_id: str,
     comment_data: CommentCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_username),
     db: Session = Depends(get_db)
 ):
     """Create a comment on a post."""
-    # Check if user has username set
-    if not current_user.username:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username is required to comment on posts. Please set a username in your profile."
-        )
     
     # Check if post exists and user can see it
     post = db.query(Post).filter(Post.id == post_id).first()
@@ -490,7 +473,7 @@ async def create_comment(
         post_id=str(comment.post_id),
         user_id=comment.user_id,
         username=current_user.username,
-        user_email=current_user.email,
+        is_pt=current_user.is_pt,  # Use database field instead of email
         content=comment.content,
         parent_comment_id=str(comment.parent_comment_id) if comment.parent_comment_id else None,
         created_at=comment.created_at,
@@ -554,10 +537,11 @@ async def get_follow_status(
 @router.post("/users/{username}/follow", response_model=dict)
 async def toggle_follow(
     username: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_username),
     db: Session = Depends(get_db)
 ):
     """Follow or unfollow a user."""
+    
     target_user = get_user_by_username(db, username)
     if not target_user:
         raise HTTPException(
@@ -652,7 +636,7 @@ async def get_user_posts(
             id=str(post.id),
             user_id=post.user_id,
             username=target_user.username,
-            user_email=target_user.email,
+            is_pt=target_user.is_pt,  # Use database field instead of email
             post_type=post.post_type,
             content=post.content,
             analysis_id=post.analysis_id,
@@ -666,6 +650,103 @@ async def get_user_posts(
         )
         for post in posts
     ]
+
+
+@router.get("/users/{username}/profile", response_model=PublicUserProfileResponse)
+async def get_user_profile(
+    username: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get public profile for a user by username.
+    
+    Privacy rules (hierarchy):
+    1. full_name and email are NEVER exposed to other users
+    2. username and preferences (technical_level, favorite_exercise, community_preference) are always visible
+    3. posts are only visible if:
+       - User is public (is_public=True), OR
+       - User is private (is_public=False) but current_user follows them
+    """
+    # Get target user
+    target_user = get_user_by_username(db, username)
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Check if viewer can see posts (using existing helper function)
+    can_see_posts = check_user_can_see_posts(current_user.id, target_user, db)
+    
+    # Build base response - always include username and preferences
+    # Rule 1: NEVER include full_name or email
+    response_data = {
+        "username": target_user.username,
+        "is_pt": target_user.is_pt,  # Include PT verification status
+        "technical_level": target_user.technical_level,  # answer1
+        "favorite_exercise": target_user.favorite_exercise,  # answer2
+        "community_preference": target_user.community_preference,  # answer3
+        "is_public": target_user.is_public,
+        "can_see_posts": can_see_posts,
+        "posts": None
+    }
+    
+    # Rule 3: Only include posts if viewer can see them
+    if can_see_posts:
+        # Get user's posts (same logic as get_user_posts endpoint)
+        posts = db.query(Post).filter(
+            Post.user_id == target_user.id
+        ).order_by(Post.created_at.desc()).limit(20).all()  # Limit to recent 20 posts
+        
+        # Get counts and like status for posts
+        post_ids = [str(post.id) for post in posts]
+        
+        if post_ids:
+            like_counts = db.query(
+                Like.post_id,
+                func.count(Like.id).label('count')
+            ).filter(Like.post_id.in_(post_ids)).group_by(Like.post_id).all()
+            like_count_map = {str(post_id): count for post_id, count in like_counts}
+            
+            comment_counts = db.query(
+                Comment.post_id,
+                func.count(Comment.id).label('count')
+            ).filter(Comment.post_id.in_(post_ids)).group_by(Comment.post_id).all()
+            comment_count_map = {str(post_id): count for post_id, count in comment_counts}
+            
+            user_likes = db.query(Like.post_id).filter(
+                and_(
+                    Like.post_id.in_(post_ids),
+                    Like.user_id == current_user.id
+                )
+            ).all()
+            liked_post_ids = {str(post_id) for post_id, in user_likes}
+            
+            # Build post responses (without exposing email/full_name)
+            response_data["posts"] = [
+                PostResponse(
+                    id=str(post.id),
+                    user_id=post.user_id,
+                    username=target_user.username,  # Only username, no email
+                    is_pt=target_user.is_pt,  # Use database field for PT verification
+                    post_type=post.post_type,
+                    content=post.content,
+                    analysis_id=post.analysis_id,
+                    score_data=post.score_data,
+                    plot_config=post.plot_config,
+                    created_at=post.created_at,
+                    updated_at=post.updated_at,
+                    like_count=like_count_map.get(str(post.id), 0),
+                    comment_count=comment_count_map.get(str(post.id), 0),
+                    is_liked=str(post.id) in liked_post_ids
+                )
+                for post in posts
+            ]
+        else:
+            response_data["posts"] = []
+    
+    return PublicUserProfileResponse(**response_data)
 
 
 @router.patch("/users/me/privacy", response_model=PrivacyResponse)
@@ -718,13 +799,14 @@ async def get_my_followers(
     following_ids_set = {row[0] for row in following_ids}
     
     # Build response
+    # Never expose email - use username or "Unknown User" as fallback
     follower_list = []
     for user in followers:
         follower_list.append(FollowerInfo(
             id=user.id,
             user_id=user.id,
             username=user.username,
-            full_name=user.full_name or user.email or "Unknown User",
+            full_name=user.full_name or user.username or "Unknown User",  # Never expose email
             is_following_back=user.id in following_ids_set
         ))
     
@@ -752,13 +834,14 @@ async def get_my_following(
     following_users = db.query(User).filter(User.id.in_(following_ids)).all()
     
     # Build response (is_following_back is always True since we're following them)
+    # Never expose email - use username or "Unknown User" as fallback
     following_list = []
     for user in following_users:
         following_list.append(FollowerInfo(
             id=user.id,
             user_id=user.id,
             username=user.username,
-            full_name=user.full_name or user.email or "Unknown User",
+            full_name=user.full_name or user.username or "Unknown User",  # Never expose email
             is_following_back=True  # Always true since we're following them
         ))
     

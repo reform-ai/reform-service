@@ -50,6 +50,7 @@ class User(Base):
     is_verified = Column(Boolean, default=False, nullable=False)
     is_public = Column(Boolean, default=True, nullable=False)  # Privacy setting for social feed
     is_pt = Column(Boolean, default=False, nullable=False)  # Personal Trainer attribute
+    is_admin = Column(Boolean, default=False, nullable=False)  # Admin role for system administration
     technical_level = Column(String, nullable=True)  # beginner, novice, intermediate, advanced, elite
     favorite_exercise = Column(String, nullable=True)  # Favorite exercise (dropdown selection later)
     community_preference = Column(String, nullable=True)  # share_to_similar_levels, share_to_pt, compete_with_someone

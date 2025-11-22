@@ -51,3 +51,21 @@ def get_current_user(
     
     return user
 
+
+def require_username(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """
+    Dependency that ensures the current user has a username set.
+    Required for social features (posts, likes, comments, follows).
+    
+    Raises HTTPException if username is not set.
+    Returns the user if username is set.
+    """
+    if not current_user.username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username is required for this action. Please set a username in your profile."
+        )
+    return current_user
+

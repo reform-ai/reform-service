@@ -44,3 +44,7 @@ outputs/
 *.db
 reform.db
 
+# Scripts (destructive/local-only)
+scripts/delete_users_except.py
+ADMIN_USAGE.md
+
