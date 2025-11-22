@@ -27,6 +27,8 @@ from src.shared.payment.routes import router as payment_router
 from src.shared.contact.routes import router as contact_router
 from src.shared.admin.routes import router as admin_router
 from src.shared.analyses.routes import router as analyses_router
+# Import Analysis model to ensure it's registered in Base.metadata before init_db() is called
+from src.shared.analyses.database import Analysis  # noqa: F401
 from fastapi.security import HTTPAuthorizationCredentials
 from typing import Optional
 
@@ -54,9 +56,7 @@ async def startup_event():
         # Initialize contact rate limiting tables
         from src.shared.contact.database import Base as ContactBase
         ContactBase.metadata.create_all(bind=engine, checkfirst=True)
-        # Initialize analysis history tables
-        from src.shared.analyses.database import Base as AnalysesBase
-        AnalysesBase.metadata.create_all(bind=engine, checkfirst=True)
+        # Note: Analysis table uses the same Base as User, so it's already created by init_db()
         logging.info("Database initialization completed on startup")
     except Exception as e:
         # Log error but don't crash the app
