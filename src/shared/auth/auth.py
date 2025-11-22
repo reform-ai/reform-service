@@ -16,7 +16,10 @@ if not SECRET_KEY:
         "Please set SECRET_KEY to a secure random string."
     )
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30 days
+# Access tokens are short-lived for security (15 minutes)
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+# Refresh tokens are long-lived (30 days)
+REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 
 def hash_password(password: str) -> str:
@@ -55,7 +58,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
-    """Create a JWT access token."""
+    """Create a JWT access token (short-lived)."""
     if not SECRET_KEY:
         raise ValueError(
             "SECRET_KEY environment variable is required for token creation. "
@@ -66,19 +69,44 @@ def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
         expire = datetime.utcnow() + expires_delta
     else:
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "type": "access"})  # Mark as access token
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
 
-def verify_token(token: str) -> dict:
-    """Verify and decode a JWT token."""
+def create_refresh_token(data: dict) -> str:
+    """Create a JWT refresh token (long-lived)."""
+    if not SECRET_KEY:
+        raise ValueError(
+            "SECRET_KEY environment variable is required for token creation."
+        )
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "type": "refresh"})  # Mark as refresh token
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def verify_token(token: str, token_type: str = None) -> dict:
+    """
+    Verify and decode a JWT token.
+    
+    Args:
+        token: JWT token string
+        token_type: Optional token type to verify ("access" or "refresh")
+    
+    Returns:
+        Decoded token payload or None if invalid
+    """
     if not SECRET_KEY:
         import logging
         logging.error("SECRET_KEY is not set. Cannot verify token.")
         return None
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # If token_type is specified, verify it matches
+        if token_type and payload.get("type") != token_type:
+            return None
         return payload
     except JWTError:
         return None
