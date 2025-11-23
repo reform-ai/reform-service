@@ -1,15 +1,18 @@
 """Social feed routes: posts, likes, comments, follows."""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, and_
 from datetime import datetime
 from typing import List, Optional
 from uuid import uuid4
+from pathlib import Path
+import os
 
 from src.shared.auth.database import get_db, User
 from src.shared.auth.dependencies import get_current_user, require_username_and_verified
 from src.shared.social.database import Post, Like, Comment, Follow
+from src.shared.social.image_utils import process_image
 from src.shared.social.schemas import (
     PostCreate,
     PostResponse,
@@ -26,6 +29,13 @@ from src.shared.social.schemas import (
 )
 
 router = APIRouter(prefix="/api/social", tags=["social"])
+
+# Image upload directory (similar to OUTPUTS_DIR pattern)
+if os.environ.get("DYNO"):  # Heroku
+    POST_IMAGES_DIR = Path("/tmp/uploads/posts")
+else:
+    POST_IMAGES_DIR = Path("uploads/posts")
+POST_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_user_by_username(db: Session, username: str) -> Optional[User]:
@@ -163,6 +173,7 @@ async def get_feed(
             analysis_id=post.analysis_id,
             score_data=post.score_data,
             plot_config=post.plot_config,
+            image_urls=post.image_urls,  # Include image URLs
             created_at=post.created_at,
             updated_at=post.updated_at,
             like_count=like_count_map.get(str(post.id), 0),
@@ -177,6 +188,45 @@ async def get_feed(
         offset=offset,
         has_more=(offset + limit) < total
     )
+
+
+@router.post("/posts/images/upload")
+async def upload_post_image(
+    request: Request,
+    image: UploadFile = File(...),
+    current_user: User = Depends(require_username_and_verified),
+):
+    """
+    Upload an image for a post.
+    Returns image URL and optional thumbnail URL.
+    """
+    try:
+        image_url, thumbnail_url = process_image(image, POST_IMAGES_DIR)
+        
+        # Construct full URLs
+        if os.environ.get("DYNO"):  # Heroku
+            scheme = request.headers.get("X-Forwarded-Proto", "https")
+            host = request.headers.get("Host", request.url.hostname)
+            base_url = f"{scheme}://{host}"
+        else:  # Localhost
+            base_url = str(request.base_url).rstrip('/')
+        
+        full_image_url = f"{base_url}{image_url}"
+        full_thumbnail_url = f"{base_url}{thumbnail_url}" if thumbnail_url else None
+        
+        return {
+            "image_url": full_image_url,
+            "thumbnail_url": full_thumbnail_url
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logging.error(f"Error uploading image: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to upload image"
+        )
 
 
 @router.post("/posts", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
@@ -196,6 +246,7 @@ async def create_post(
         analysis_id=post_data.analysis_id,
         score_data=post_data.score_data,
         plot_config=post_data.plot_config,
+        image_urls=post_data.image_urls,  # Store image URLs
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     )
@@ -214,6 +265,7 @@ async def create_post(
         analysis_id=post.analysis_id,
         score_data=post.score_data,
         plot_config=post.plot_config,
+        image_urls=post.image_urls,  # Include image URLs in response
         created_at=post.created_at,
         updated_at=post.updated_at,
         like_count=0,
@@ -261,6 +313,7 @@ async def get_post(
         analysis_id=post.analysis_id,
         score_data=post.score_data,
         plot_config=post.plot_config,
+        image_urls=post.image_urls,  # Include image URLs
         created_at=post.created_at,
         updated_at=post.updated_at,
         like_count=like_count,
@@ -650,6 +703,7 @@ async def get_user_posts(
             analysis_id=post.analysis_id,
             score_data=post.score_data,
             plot_config=post.plot_config,
+            image_urls=post.image_urls,  # Include image URLs
             created_at=post.created_at,
             updated_at=post.updated_at,
             like_count=like_count_map.get(str(post.id), 0),
@@ -743,6 +797,7 @@ async def get_user_profile(
                     analysis_id=post.analysis_id,
                     score_data=post.score_data,
                     plot_config=post.plot_config,
+                    image_urls=post.image_urls,  # Include image URLs
                     created_at=post.created_at,
                     updated_at=post.updated_at,
                     like_count=like_count_map.get(str(post.id), 0),

@@ -367,6 +367,46 @@ async def get_output_file(filename: str):
     )
 
 
+@app.get("/uploads/posts/{filename}")
+async def serve_post_image(filename: str):
+    """Serve uploaded post images."""
+    # Security: sanitize filename to prevent path traversal
+    if not filename or ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Invalid filename"})
+    
+    safe_filename = os.path.basename(filename)
+    
+    # Determine upload directory (same pattern as OUTPUTS_DIR)
+    if os.environ.get("DYNO"):  # Heroku
+        uploads_dir = Path("/tmp/uploads/posts")
+    else:
+        uploads_dir = Path("uploads/posts")
+    
+    file_path = uploads_dir / safe_filename
+    
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Image not found"})
+    
+    # Determine media type based on extension
+    ext = safe_filename.lower()
+    if ext.endswith(('.jpg', '.jpeg')):
+        media_type = "image/jpeg"
+    elif ext.endswith('.png'):
+        media_type = "image/png"
+    elif ext.endswith('.webp'):
+        media_type = "image/webp"
+    elif ext.endswith('.gif'):
+        media_type = "image/gif"
+    else:
+        media_type = "image/jpeg"  # Default
+    
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        filename=safe_filename
+    )
+
+
 def get_required_landmarks(exercise: int) -> list:
     """
     General function to get required landmarks for an exercise.

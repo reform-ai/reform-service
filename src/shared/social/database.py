@@ -1,7 +1,7 @@
 """Database models for social feed feature."""
 
 from sqlalchemy import Column, String, Boolean, DateTime, Integer, Text, ForeignKey, UniqueConstraint, Index
-from sqlalchemy.dialects.postgresql import UUID, JSON
+from sqlalchemy.dialects.postgresql import UUID, JSON, JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -21,6 +21,7 @@ class Post(Base):
     analysis_id = Column(String, nullable=True)  # Link to analysis if sharing from analysis
     score_data = Column(JSON, nullable=True)  # Snapshot of score details
     plot_config = Column(JSON, nullable=True)  # Config to recreate plots
+    image_urls = Column(JSONB, nullable=True)  # List of image URLs (for photo posts, future: analysis-to-photo conversion)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

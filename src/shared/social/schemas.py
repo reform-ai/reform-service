@@ -21,6 +21,7 @@ class PostCreate(BaseModel):
     analysis_id: Optional[str] = None  # Link to analysis if sharing from analysis
     score_data: Optional[Dict[str, Any]] = None  # Snapshot of score details
     plot_config: Optional[Dict[str, Any]] = None  # Config to recreate plots
+    image_urls: Optional[List[str]] = None  # List of image URLs (for photo posts, future: analysis-to-photo conversion)
     
     @field_validator('content')
     @classmethod
@@ -46,6 +47,7 @@ class PostResponse(BaseModel):
     analysis_id: Optional[str] = None
     score_data: Optional[Dict[str, Any]] = None
     plot_config: Optional[Dict[str, Any]] = None
+    image_urls: Optional[List[str]] = None  # List of image URLs (for photo posts, future: analysis-to-photo conversion)
     created_at: datetime
     updated_at: datetime
     like_count: int = 0
