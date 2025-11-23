@@ -104,91 +104,108 @@ async def get_feed(
     db: Session = Depends(get_db)
 ):
     """Get chronological feed of posts."""
-    # Get all users the current user follows
-    following_ids_query = db.query(Follow.following_id).filter(
-        Follow.follower_id == current_user.id
-    )
-    following_ids_list = [row[0] for row in following_ids_query.all()]
-    
-    # Build filter conditions
-    # Posts are visible if:
-    # 1. User is currently public (regardless of when post was created)
-    # 2. User is private BUT we follow them
-    # 3. It's our own post
-    conditions = [
-        User.is_public == True,  # Public users' posts (checks current privacy setting)
-        Post.user_id == current_user.id  # Our own posts
-    ]
-    
-    # Add condition for users we follow (only if we follow anyone)
-    if following_ids_list:
-        conditions.append(Post.user_id.in_(following_ids_list))
-    
-    query = db.query(Post).join(User, Post.user_id == User.id).filter(
-        or_(*conditions)
-    ).order_by(Post.created_at.desc())
-    
-    total = query.count()
-    posts = query.offset(offset).limit(limit).all()
-    
-    # Get like counts, comment counts, and whether current user liked each post
-    post_ids = [str(post.id) for post in posts]
-    
-    like_counts = db.query(
-        Like.post_id,
-        func.count(Like.id).label('count')
-    ).filter(Like.post_id.in_(post_ids)).group_by(Like.post_id).all()
-    like_count_map = {str(post_id): count for post_id, count in like_counts}
-    
-    comment_counts = db.query(
-        Comment.post_id,
-        func.count(Comment.id).label('count')
-    ).filter(Comment.post_id.in_(post_ids)).group_by(Comment.post_id).all()
-    comment_count_map = {str(post_id): count for post_id, count in comment_counts}
-    
-    user_likes = db.query(Like.post_id).filter(
-        and_(
-            Like.post_id.in_(post_ids),
-            Like.user_id == current_user.id
+    try:
+        # Get all users the current user follows
+        following_ids_query = db.query(Follow.following_id).filter(
+            Follow.follower_id == current_user.id
         )
-    ).all()
-    liked_post_ids = {str(post_id[0]) for post_id in user_likes}
-    
-    # Get usernames and emails for all post owners
-    user_ids = list(set(post.user_id for post in posts))
-    users = db.query(User).filter(User.id.in_(user_ids)).all()
-    username_map = {user.id: user.username for user in users}
-    is_pt_map = {user.id: user.is_pt for user in users}  # Map user IDs to is_pt status
-    
-    # Build response
-    post_responses = []
-    for post in posts:
-        post_responses.append(PostResponse(
-            id=str(post.id),
-            user_id=post.user_id,
-            username=username_map.get(post.user_id),
-            is_pt=is_pt_map.get(post.user_id, False),  # Use database field instead of email
-            post_type=post.post_type,
-            content=post.content,
-            analysis_id=post.analysis_id,
-            score_data=post.score_data,
-            plot_config=post.plot_config,
-            image_urls=post.image_urls,  # Include image URLs
-            thumbnail_urls=post.thumbnail_urls,  # Include thumbnail URLs
-            created_at=post.created_at,
-            updated_at=post.updated_at,
-            like_count=like_count_map.get(str(post.id), 0),
-            comment_count=comment_count_map.get(str(post.id), 0),
-            is_liked=str(post.id) in liked_post_ids
-        ))
-    
-    return FeedResponse(
-        posts=post_responses,
-        total=total,
-        limit=limit,
-        offset=offset,
-        has_more=(offset + limit) < total
-    )
+        following_ids_list = [row[0] for row in following_ids_query.all()]
+        
+        # Build filter conditions
+        # Posts are visible if:
+        # 1. User is currently public (regardless of when post was created)
+        # 2. User is private BUT we follow them
+        # 3. It's our own post
+        conditions = [
+            User.is_public == True,  # Public users' posts (checks current privacy setting)
+            Post.user_id == current_user.id  # Our own posts
+        ]
+        
+        # Add condition for users we follow (only if we follow anyone)
+        if following_ids_list:
+            conditions.append(Post.user_id.in_(following_ids_list))
+        
+        query = db.query(Post).join(User, Post.user_id == User.id).filter(
+            or_(*conditions)
+        ).order_by(Post.created_at.desc())
+        
+        total = query.count()
+        posts = query.offset(offset).limit(limit).all()
+        
+        # Get like counts, comment counts, and whether current user liked each post
+        post_ids = [str(post.id) for post in posts]
+        
+        like_count_map = {}
+        comment_count_map = {}
+        liked_post_ids = set()
+        
+        if post_ids:
+            like_counts = db.query(
+                Like.post_id,
+                func.count(Like.id).label('count')
+            ).filter(Like.post_id.in_(post_ids)).group_by(Like.post_id).all()
+            like_count_map = {str(post_id): count for post_id, count in like_counts}
+            
+            comment_counts = db.query(
+                Comment.post_id,
+                func.count(Comment.id).label('count')
+            ).filter(Comment.post_id.in_(post_ids)).group_by(Comment.post_id).all()
+            comment_count_map = {str(post_id): count for post_id, count in comment_counts}
+            
+            user_likes = db.query(Like.post_id).filter(
+                and_(
+                    Like.post_id.in_(post_ids),
+                    Like.user_id == current_user.id
+                )
+            ).all()
+            # Handle both tuple and scalar returns from SQLAlchemy
+            liked_post_ids = {str(row[0] if isinstance(row, tuple) else row) for row in user_likes}
+        
+        # Get usernames and emails for all post owners
+        user_ids = list(set(post.user_id for post in posts))
+        username_map = {}
+        is_pt_map = {}
+        if user_ids:
+            users = db.query(User).filter(User.id.in_(user_ids)).all()
+            username_map = {user.id: user.username for user in users}
+            is_pt_map = {user.id: user.is_pt for user in users}  # Map user IDs to is_pt status
+        
+        # Build response
+        post_responses = []
+        for post in posts:
+            post_responses.append(PostResponse(
+                id=str(post.id),
+                user_id=post.user_id,
+                username=username_map.get(post.user_id),
+                is_pt=is_pt_map.get(post.user_id, False),  # Use database field instead of email
+                post_type=post.post_type,
+                content=post.content,
+                analysis_id=post.analysis_id,
+                score_data=post.score_data,
+                plot_config=post.plot_config,
+                image_urls=post.image_urls,  # Include image URLs
+                thumbnail_urls=post.thumbnail_urls,  # Include thumbnail URLs
+                created_at=post.created_at,
+                updated_at=post.updated_at,
+                like_count=like_count_map.get(str(post.id), 0),
+                comment_count=comment_count_map.get(str(post.id), 0),
+                is_liked=str(post.id) in liked_post_ids
+            ))
+        
+        return FeedResponse(
+            posts=post_responses,
+            total=total,
+            limit=limit,
+            offset=offset,
+            has_more=(offset + limit) < total
+        )
+    except Exception as e:
+        import logging
+        logging.error(f"Error in get_feed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch feed: {str(e)}"
+        )
 
 
 @router.post("/posts/images/upload")
