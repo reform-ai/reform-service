@@ -152,7 +152,7 @@ async def get_feed(
             Like.user_id == current_user.id
         )
     ).all()
-    liked_post_ids = {str(post_id) for post_id, in user_likes}
+    liked_post_ids = {str(post_id[0]) for post_id in user_likes}
     
     # Get usernames and emails for all post owners
     user_ids = list(set(post.user_id for post in posts))
@@ -693,7 +693,7 @@ async def get_user_posts(
             Like.user_id == current_user.id
         )
     ).all()
-    liked_post_ids = {str(post_id) for post_id, in user_likes}
+    liked_post_ids = {str(post_id[0]) for post_id in user_likes}
     
     return [
         PostResponse(
@@ -786,7 +786,7 @@ async def get_user_profile(
                     Like.user_id == current_user.id
                 )
             ).all()
-            liked_post_ids = {str(post_id) for post_id, in user_likes}
+            liked_post_ids = {str(post_id[0]) for post_id in user_likes}
             
             # Build post responses (without exposing email/full_name)
             response_data["posts"] = [
