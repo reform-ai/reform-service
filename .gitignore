@@ -54,6 +54,9 @@ TESTING_LOCALLY.md
 # Outputs
 outputs/
 
+# Uploads
+uploads/
+
 # Database
 *.db
 reform.db
